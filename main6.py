@@ -97,12 +97,16 @@ def process_query(query, columns):
     
     # Determine chart type using DistilBERT
     predicted_class_id = process_query_distilbert(query)
+    st.write(predicted_class_id)
     chart_type = determine_chart_type(query, predicted_class_id)
     st.write("Chart Type: ", chart_type)
     
     # Extract and autocorrect attributes
     tokens = [token.text for token in doc]
+    st.write('tokens:', tokens)
+    st.write('columns:', columns)
     combined_attributes = combine_and_match(tokens, columns)
+    st.write('combined_attributes:', combined_attributes)
     
     # Ensure relevant and unique attributes
     relevant_attributes = []
@@ -229,21 +233,21 @@ def generate_plot(result, plot_type, x, y, title):
         x, y = y, x
 
     if plot_type == 'bar':
-        fig = px.bar(result, x=x, y=y, title=title)
+        fig = px.bar(result, x=x, y=y, title=title, text=y)
     elif plot_type == 'line':
-        fig = px.line(result, x=x, y=y, title=title)
+        fig = px.line(result, x=x, y=y, title=title, text=y)
     elif plot_type == 'scatter':
-        fig = px.scatter(result, x=x, y=y, title=title)
+        fig = px.scatter(result, x=x, y=y, title=title, text=y)
     elif plot_type == 'histogram':
-        fig = px.histogram(result, x=x, title=title)
+        fig = px.histogram(result, x=x, title=title, text=y)
     elif plot_type == 'pie':
         fig = px.pie(result, names=x, values=y, title=title)
     elif plot_type == 'area':
-        fig = px.area(result, x=x, y=y, title=title)
+        fig = px.area(result, x=x, y=y, title=title, text=y)
     elif plot_type == 'box':
-        fig = px.box(result, x=x, y=y, title=title)
+        fig = px.box(result, x=x, y=y, title=title, text=y)
     elif plot_type == 'heatmap':
-        fig = px.imshow(result.corr(), title=title)
+        fig = px.imshow(result.corr(), title=title, text=y)
     elif plot_type == 'violin':
         fig = px.violin(result, x=x, y=y, title=title)
     elif plot_type == 'map':
@@ -254,7 +258,7 @@ def generate_plot(result, plot_type, x, y, title):
             if 'city' in [x, y]:
                 result = add_lat_lon_static(result, 'city')
             if 'latitude' in result.columns and 'longitude' in result.columns:
-                fig = px.scatter_mapbox(result, lat='latitude', lon='longitude', title=title, mapbox_style="carto-positron", size=y if result[y].dtype != 'object' else None)
+                fig = px.scatter_mapbox(result, text=y, lat='latitude', lon='longitude', title=title, mapbox_style="carto-positron", size=y if result[y].dtype != 'object' else None)
                 fig.update_layout(mapbox_zoom=3, mapbox_center={"lat": 37.0902, "lon": -95.7129})
             else:
                 st.error("Failed to add latitude and longitude for the country or city names.")
@@ -310,7 +314,12 @@ if uploaded_file is not None:
                             corrected_attributes = [autocorrect(attr, columns) for attr in attributes]
                             st.write(f"Corrected attributes: {corrected_attributes}")  # Log corrected attributes for debugging
                             if "top" in user_query:
-                                result = data.groupby(corrected_attributes[1])[corrected_attributes[0]].sum().reset_index().sort_values(by=corrected_attributes[0], ascending=False).head(10)
+                                number = int(''.join(filter(str.isdigit, user_query)))
+                                result = data.groupby(corrected_attributes[1])[corrected_attributes[0]].sum().reset_index().sort_values(by=corrected_attributes[0], ascending=False).head(number)
+                                title = f'Top {corrected_attributes[0]} by {corrected_attributes[1]}'
+                            elif "bottom" in user_query:
+                                number = int(''.join(filter(str.isdigit, user_query)))
+                                result = data.groupby(corrected_attributes[1])[corrected_attributes[0]].sum().reset_index().sort_values(by=corrected_attributes[0], ascending=True).head(number)
                                 title = f'Top {corrected_attributes[0]} by {corrected_attributes[1]}'
                             elif "quantity" in user_query or "sales" in user_query:
                                 result = data.groupby(corrected_attributes[0])[corrected_attributes[1]].sum().reset_index()
@@ -328,7 +337,7 @@ if uploaded_file is not None:
                             if result is not None:
                                 fig = generate_plot(result, chart_type, corrected_attributes[0], corrected_attributes[1], title)
                                 if fig:
-                                    st.plotly_chart(fig)
+                                    st.plotly_chart(fig, use_container_width=True)
                             else:
                                 st.error("No data to display for the given query.")
                         except KeyError as e:

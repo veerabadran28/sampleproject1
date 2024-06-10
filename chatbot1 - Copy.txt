@@ -1,0 +1,448 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "id": "d43085ca",
+   "metadata": {},
+   "source": [
+    "# ChatBot - Interactive Data Analysis & Visualization"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "03a3b048",
+   "metadata": {},
+   "source": [
+    "### Imports and Model Initialization"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "b049bdad",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import streamlit as st\n",
+    "import pandas as pd\n",
+    "import plotly.express as px\n",
+    "import spacy\n",
+    "from transformers import GPT2Tokenizer, GPT2LMHeadModel\n",
+    "from difflib import get_close_matches\n",
+    "from Levenshtein import distance as levenshtein_distance\n",
+    "import io\n",
+    "\n",
+    "# Load spaCy model\n",
+    "nlp = spacy.load(\"en_core_web_sm\")\n",
+    "\n",
+    "# Load GPT-2 model and tokenizer\n",
+    "tokenizer = GPT2Tokenizer.from_pretrained(\"distilgpt2\")\n",
+    "model = GPT2LMHeadModel.from_pretrained(\"distilgpt2\")\n",
+    "\n",
+    "# Set the Streamlit page to wide mode\n",
+    "st.set_page_config(layout=\"wide\")\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "4852cfa9",
+   "metadata": {},
+   "source": [
+    "* Streamlit: A library used to create web apps for data science and machine learning projects.\n",
+    "* Pandas: A library for data manipulation and analysis.\n",
+    "* Plotly Express: A high-level interface for Plotly, used for creating interactive plots.\n",
+    "* SpaCy: A library for natural language processing.\n",
+    "* Transformers: A library from Hugging Face providing pre-trained models like GPT-2.\n",
+    "* difflib & Levenshtein: Libraries used for string matching and calculating the Levenshtein distance, respectively.\n",
+    "* We load the necessary NLP and LLM models using SpaCy and the Transformers library.\n",
+    "\n",
+    "## Function Definitions\n",
+    "\n",
+    "### Data Loading:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "70be7bd2",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def load_data(file):\n",
+    "    if file.name.endswith('.csv'):\n",
+    "        data = pd.read_csv(file)\n",
+    "    elif file.name.endswith('.xlsx'):\n",
+    "        xls = pd.ExcelFile(file)\n",
+    "        sheet_name = st.selectbox('Select sheet', xls.sheet_names) if len(xls.sheet_names) > 1 else xls.sheet_names[0]\n",
+    "        data = pd.read_excel(file, sheet_name=sheet_name)\n",
+    "    elif file.name.endswith('.json'):\n",
+    "        data = pd.read_json(file)\n",
+    "    elif file.name.endswith('.parquet'):\n",
+    "        data = pd.read_parquet(file)\n",
+    "    else:\n",
+    "        data = pd.read_csv(file, delimiter=st.text_input('Enter delimiter', value=','))\n",
+    "    data.columns = data.columns.str.lower()  # Convert column names to lowercase\n",
+    "    return data\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "48fa9a71",
+   "metadata": {},
+   "source": [
+    "#### load_data(file):\n",
+    "This function loads data from various file formats (CSV, Excel, JSON, Parquet, or text with a delimiter). It reads the file and converts column names to lowercase.\n",
+    "\n",
+    "### Autocorrection:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "b6510e25",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def autocorrect(word, possibilities):\n",
+    "    word = word.lower()\n",
+    "    closest_match = min(possibilities, key=lambda x: levenshtein_distance(word, x))\n",
+    "    return closest_match\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "d11153c7",
+   "metadata": {},
+   "source": [
+    "#### autocorrect(word, possibilities): \n",
+    "This function corrects a given word by finding the closest match from a list of possibilities using Levenshtein distance.\n",
+    "\n",
+    "### Token Combination:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "f6416c00",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def combine_and_match(tokens, columns):\n",
+    "    combined_attributes = []\n",
+    "    for i in range(len(tokens)):\n",
+    "        for j in range(i + 1, len(tokens) + 1):\n",
+    "            combined = ''.join(tokens[i:j]).lower()\n",
+    "            if combined in columns:\n",
+    "                combined_attributes.append(combined)\n",
+    "    return combined_attributes\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "22e758a9",
+   "metadata": {},
+   "source": [
+    "* combine_and_match(tokens, columns): This function combines tokens to match with column names, helping to handle cases where attributes are split into multiple tokens.\n",
+    "\n",
+    "### GPT-2 Query Processing:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "5152e46a",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def process_query_gpt(query):\n",
+    "    inputs = tokenizer.encode(query, return_tensors=\"pt\")\n",
+    "    outputs = model.generate(inputs, max_length=50, num_beams=5, early_stopping=True)\n",
+    "    response = tokenizer.decode(outputs[0], skip_special_tokens=True)\n",
+    "    return response\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "945acb18",
+   "metadata": {},
+   "source": [
+    "* process_query_gpt(query): This function uses GPT-2 to process the user query and generate a response.\n",
+    "\n",
+    "### Query Processing with SpaCy:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "98688b87",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def process_query(query, columns):\n",
+    "    response = process_query_gpt(query)\n",
+    "    doc = nlp(response.lower())\n",
+    "    \n",
+    "    # Determine chart type\n",
+    "    chart_type = None\n",
+    "    if \"horizontal bar\" in response or \"bar\" in response:\n",
+    "        chart_type = 'bar'\n",
+    "    elif \"line\" in response:\n",
+    "        chart_type = 'line'\n",
+    "    elif \"scatter\" in response:\n",
+    "        chart_type = 'scatter'\n",
+    "    elif \"histogram\" in response:\n",
+    "        chart_type = 'histogram'\n",
+    "    elif \"pie\" in response:\n",
+    "        chart_type = 'pie'\n",
+    "    elif \"summary\" in response or \"statistics\" in response:\n",
+    "        return \"summary\", []\n",
+    "    elif \"area\" in response:\n",
+    "        chart_type = 'area'\n",
+    "    elif \"box\" in response:\n",
+    "        chart_type = 'box'\n",
+    "    elif \"heatmap\" in response:\n",
+    "        chart_type = 'heatmap'\n",
+    "    elif \"violin\" in response:\n",
+    "        chart_type = 'violin'\n",
+    "    \n",
+    "    # Extract and autocorrect attributes\n",
+    "    tokens = [token.text for token in doc]\n",
+    "    combined_attributes = combine_and_match(tokens, columns)\n",
+    "    \n",
+    "    # Ensure relevant and unique attributes\n",
+    "    relevant_attributes = []\n",
+    "    for attr in combined_attributes:\n",
+    "        if attr in columns and attr not in relevant_attributes:\n",
+    "            relevant_attributes.append(attr)\n",
+    "    \n",
+    "    # Handle individual tokens if not enough relevant attributes found\n",
+    "    if len(relevant_attributes) < 2:\n",
+    "        for token in tokens:\n",
+    "            corrected_attr = autocorrect(token, columns)\n",
+    "            if corrected_attr in columns and corrected_attr not in relevant_attributes:\n",
+    "                relevant_attributes.append(corrected_attr)\n",
+    "            if len(relevant_attributes) >= 2:\n",
+    "                break\n",
+    "    \n",
+    "    return chart_type, relevant_attributes\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "6be81554",
+   "metadata": {},
+   "source": [
+    "* process_query(query, columns): This function processes the user query using GPT-2 and SpaCy to determine the chart type and extract relevant attributes from the query. It autocorrects and combines tokens to match with column names.\n",
+    "\n",
+    "### Data Summary:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "5d33d3fd",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def generate_summary(data):\n",
+    "    summary = data.describe(include='all').transpose()\n",
+    "    summary['missing_values'] = data.isnull().sum()\n",
+    "    summary['unique_values'] = data.nunique()\n",
+    "    return summary\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "0eed56c4",
+   "metadata": {},
+   "source": [
+    "* generate_summary(data): This function generates an overall summary of the data, including descriptive statistics, missing values, and unique values for each column.\n",
+    "\n",
+    "### Display Summary:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "0b143cd5",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def display_summary(summary):\n",
+    "    with st.expander(\"Overall Data Summary\"):\n",
+    "        st.write(\"This summary includes the following statistics for each column in the dataset:\")\n",
+    "        st.write(\"- **count**: The number of non-null entries\")\n",
+    "        st.write(\"- **mean**: The average of the column (for numerical columns)\")\n",
+    "        st.write(\"- **std**: The standard deviation (for numerical columns)\")\n",
+    "        st.write(\"- **min**: The minimum value (for numerical columns)\")\n",
+    "        st.write(\"- **25%**: The 25th percentile (for numerical columns)\")\n",
+    "        st.write(\"- **50%**: The median or 50th percentile (for numerical columns)\")\n",
+    "        st.write(\"- **75%**: The 75th percentile (for numerical columns)\")\n",
+    "        st.write(\"- **max**: The maximum value (for numerical columns)\")\n",
+    "        st.write(\"- **missing_values**: The number of missing (null) values\")\n",
+    "        st.write(\"- **unique_values**: The number of unique values\")\n",
+    "        st.dataframe(summary)\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "08df6b3c",
+   "metadata": {},
+   "source": [
+    "* display_summary(summary): This function displays the data summary inside a collapsible expander in the Streamlit app.\n",
+    "\n",
+    "### Plot Generation:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "cebb3d9a",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def generate_plot(result, plot_type, x, y, title):\n",
+    "    if plot_type == 'bar':\n",
+    "        fig = px.bar(result, x=x, y=y, title=title)\n",
+    "    elif plot_type == 'line':\n",
+    "        fig = px.line(result, x=x, y=y, title=title)\n",
+    "    elif plot_type == 'scatter':\n",
+    "        fig = px.scatter(result, x=x, y=y, title=title)\n",
+    "    elif plot_type == 'histogram':\n",
+    "        fig = px.histogram(result, x=x, title=title)\n",
+    "    elif plot_type == 'pie':\n",
+    "        fig = px.pie(result, names=x, values=y, title=title)\n",
+    "    elif plot_type == 'area':\n",
+    "        fig = px.area(result, x=x, y=y, title=title)\n",
+    "    elif plot_type == 'box':\n",
+    "        fig = px.box(result, x=x, y=y, title=title)\n",
+    "    elif plot_type == 'heatmap':\n",
+    "        fig = px.imshow(result.corr(), title=title)\n",
+    "    elif plot_type == 'violin':\n",
+    "        fig = px.violin(result, x=x, y=y, title=title)\n",
+    "    return fig\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "5c5580c4",
+   "metadata": {},
+   "source": [
+    "* generate_plot(result, plot_type, x, y, title): This function generates the specified plot using Plotly Express based on the given result data, plot type, x-axis, y-axis, and title.\n",
+    "\n",
+    "### Streamlit Application:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "460cad12",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "st.title(\"Advanced Chatbot Chart Generator\")\n",
+    "st.write(\"Upload your data file and enter your query below:\")\n",
+    "\n",
+    "with st.expander(\"Upload Data File\"):\n",
+    "    uploaded_file = st.file_uploader(\"Choose a file\", type=['csv', 'xlsx', 'json', 'parquet', 'txt'])\n",
+    "\n",
+    "if uploaded_file is not None:\n",
+    "    data = load_data(uploaded_file)\n",
+    "    columns = data.columns.tolist()\n",
+    "    st.write(\"Data loaded successfully!\")\n",
+    "    \n",
+    "    with st.expander(\"Data Preview\"):\n",
+    "        st.write(\"Here's a preview of your data:\")\n",
+    "        st.dataframe(data.head())  # Show a preview of the data\n",
+    "    \n",
+    "    # Automatically display overall summary of the data\n",
+    "    summary = generate_summary(data)\n",
+    "    display_summary(summary)\n",
+    "\n",
+    "    # Text input for user query\n",
+    "    user_query = st.text_input(\"Query\", key='user_query')\n",
+    "    \n",
+    "    # Process the query only when the button is clicked\n",
+    "    if st.button('Submit'):\n",
+    "        if user_query:\n",
+    "            with st.spinner('Processing...'):\n",
+    "                chart_type, attributes = process_query(user_query, columns)\n",
+    "\n",
+    "                if chart_type == \"summary\":\n",
+    "                    display_summary(summary)\n",
+    "                elif attributes:\n",
+    "                    # Log the extracted attributes for debugging\n",
+    "                    st.write(f\"Extracted attributes: {attributes}\")\n",
+    "                    if len(attributes) < 2:\n",
+    "                        st.error(\"Not enough attributes found for the query.\")\n",
+    "                    else:\n",
+    "                        try:\n",
+    "                            # Ensure the attributes are correctly autocorrected to the exact column names\n",
+    "                            corrected_attributes = [autocorrect(attr, columns) for attr in attributes]\n",
+    "                            st.write(f\"Corrected attributes: {corrected_attributes}\")  # Log corrected attributes for debugging\n",
+    "                            if \"top\" in user_query:\n",
+    "                                result = data.groupby(corrected_attributes[1])[corrected_attributes[0]].sum().reset_index().sort_values(by=corrected_attributes[0], ascending=False).head(10)\n",
+    "                                title = f'Top {corrected_attributes[0]} by {corrected_attributes[1]}'\n",
+    "                            elif \"quantity\" in user_query or \"sales\" in user_query:\n",
+    "                                result = data.groupby(corrected_attributes[0])[corrected_attributes[1]].sum().reset_index()\n",
+    "                                title = f'{corrected_attributes[1]} vs {corrected_attributes[0]}'\n",
+    "                            elif \"date\" in user_query or \"time\" in user_query:\n",
+    "                                result = data.groupby(corrected_attributes[0])[corrected_attributes[1]].sum().reset_index()\n",
+    "                                title = f'{corrected_attributes[1]} Over Time'\n",
+    "                            else:\n",
+    "                                result = data.groupby(corrected_attributes[0])[corrected_attributes[1]].sum().reset_index()\n",
+    "                                title = f'{corrected_attributes[1]} by {corrected_attributes[0]}'\n",
+    "                            \n",
+    "                            if result is not None:\n",
+    "                                fig = generate_plot(result, chart_type, corrected_attributes[0], corrected_attributes[1], title)\n",
+    "                                st.plotly_chart(fig)\n",
+    "                            else:\n",
+    "                                st.error(\"No data to display for the given query.\")\n",
+    "                        except KeyError as e:\n",
+    "                            st.error(f\"KeyError: {e}. Available columns: {', '.join(columns)}\")\n",
+    "                        except IndexError as e:\n",
+    "                            st.error(f\"IndexError: {e}. This might be due to an incorrect number of attributes extracted from the query.\")\n",
+    "                else:\n",
+    "                    st.error(\"Query not understood. Please try again.\")\n",
+    "\n",
+    "                st.success('Done!')\n",
+    "\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "40befe4a",
+   "metadata": {},
+   "source": [
+    "* Submit Button: The code processes the user query only when the \"Submit\" button is clicked.\n",
+    "* Spinner: A spinner is shown while the query is being processed to indicate that the application is working on the request.\n",
+    "* Process Query: The process_query function is called to determine the chart type and relevant attributes from the user query.\n",
+    "* Summary Display: If the query is related to displaying a summary, the summary is shown using the display_summary function.\n",
+    "* Attribute Extraction: The extracted attributes are logged for debugging purposes. If there are fewer than two attributes, an error message is shown.\n",
+    "* Data Grouping and Plot Generation: Depending on the user query, the data is grouped and summed, and an appropriate plot is generated using the generate_plot function.\n",
+    "* Error Handling: The code handles KeyError and IndexError exceptions to provide appropriate error messages if something goes wrong."
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3 (ipykernel)",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.11.7"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}

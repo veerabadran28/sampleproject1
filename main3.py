@@ -2,17 +2,17 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import spacy
-from transformers import GPT2Tokenizer, GPT2LMHeadModel
+from transformers import DistilBertTokenizer, DistilBertForSequenceClassification
 from difflib import get_close_matches
 from Levenshtein import distance as levenshtein_distance
-import io
+import torch
 
 # Load spaCy model
 nlp = spacy.load("en_core_web_sm")
 
-# Load GPT-2 model and tokenizer
-tokenizer = GPT2Tokenizer.from_pretrained("distilgpt2")
-model = GPT2LMHeadModel.from_pretrained("distilgpt2")
+# Load DistilBERT model and tokenizer
+tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
+model = DistilBertForSequenceClassification.from_pretrained('distilbert-base-uncased', num_labels=2)
 
 # Set the Streamlit page to wide mode
 st.set_page_config(layout="wide")
@@ -50,40 +50,52 @@ def combine_and_match(tokens, columns):
                 combined_attributes.append(combined)
     return combined_attributes
 
-# Function to process user query using GPT-2
-def process_query_gpt(query):
-    inputs = tokenizer.encode(query, return_tensors="pt")
-    outputs = model.generate(inputs, max_length=50, num_beams=5, early_stopping=True)
-    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    return response
+# Function to process user query using DistilBERT
+def process_query_distilbert(query):
+    inputs = tokenizer(query, return_tensors='pt')
+    outputs = model(**inputs)
+    logits = outputs.logits
+    predicted_class_id = logits.argmax().item()
+    return predicted_class_id
 
-# Process user query with spaCy NLP
-def process_query(query, columns):
-    response = process_query_gpt(query)
-    doc = nlp(response.lower())
+# Refined function to determine chart type based on query and predictions
+def determine_chart_type(query, predicted_class_id):
+    query_lower = query.lower()
     
-    # Determine chart type
-    chart_type = None
-    if "horizontal bar" in response or "bar" in response:
-        chart_type = 'bar'
-    elif "line" in response:
-        chart_type = 'line'
-    elif "scatter" in response:
-        chart_type = 'scatter'
-    elif "histogram" in response:
-        chart_type = 'histogram'
-    elif "pie" in response:
-        chart_type = 'pie'
-    elif "summary" in response or "statistics" in response:
-        return "summary", []
-    elif "area" in response:
-        chart_type = 'area'
-    elif "box" in response:
-        chart_type = 'box'
-    elif "heatmap" in response:
-        chart_type = 'heatmap'
-    elif "violin" in response:
-        chart_type = 'violin'
+    # Explicit keyword priority
+    if "bar" in query_lower:
+        return "bar"
+    elif "line" in query_lower:
+        return "line"
+    elif "scatter" in query_lower:
+        return "scatter"
+    elif "histogram" in query_lower:
+        return "histogram"
+    elif "pie" in query_lower:
+        return "pie"
+    elif "area" in query_lower:
+        return "area"
+    elif "box" in query_lower:
+        return "box"
+    elif "heatmap" in query_lower:
+        return "heatmap"
+    elif "violin" in query_lower:
+        return "violin"
+    elif "map" in query_lower:
+        return "map"
+    
+    # Use DistilBERT prediction as fallback
+    chart_types = ["bar", "line", "scatter", "histogram", "pie", "box", "heatmap", "violin", "map"]  # Extend this list based on your classification
+    return chart_types[predicted_class_id] if predicted_class_id < len(chart_types) else "bar"
+
+# Process user query with spaCy NLP and DistilBERT
+def process_query(query, columns):
+    doc = nlp(query.lower())
+    
+    # Determine chart type using DistilBERT
+    predicted_class_id = process_query_distilbert(query)
+    chart_type = determine_chart_type(query, predicted_class_id)
+    st.write("Chart Type: ", chart_type)
     
     # Extract and autocorrect attributes
     tokens = [token.text for token in doc]
@@ -120,6 +132,25 @@ def generate_summary(data):
     summary['unique_values'] = data.nunique()
     return summary
 
+# Function to generate descriptive summary of the data
+def generate_descriptive_summary(data):
+    numerical_columns = data.select_dtypes(include=['number']).columns.tolist()
+    categorical_columns = data.select_dtypes(exclude=['number']).columns.tolist()
+    
+    summary = "The dataset contains the following columns:\n\n"
+    
+    if numerical_columns:
+        summary += "Numerical Columns:\n"
+        for col in numerical_columns:
+            summary += f"- **{col}**: {data[col].describe().to_dict()}\n"
+    
+    if categorical_columns:
+        summary += "\nCategorical Columns:\n"
+        for col in categorical_columns:
+            summary += f"- **{col}**: {data[col].value_counts().to_dict()}\n"
+    
+    return summary
+
 # Function to display summary with explanation
 def display_summary(summary):
     with st.expander("Overall Data Summary"):
@@ -136,8 +167,40 @@ def display_summary(summary):
         st.write("- **unique_values**: The number of unique values")
         st.dataframe(summary)
 
+# Function to get static mapping for country names to latitude and longitude
+def get_country_coordinates():
+    return {
+        'USA': {'latitude': 37.0902, 'longitude': -95.7129},
+        'France': {'latitude': 46.603354, 'longitude': 1.888334},
+        # Add more countries as needed
+    }
+
+# Function to add latitude and longitude to the dataframe
+def add_lat_lon_static(df, country_col):
+    coordinates = get_country_coordinates()
+    latitudes = []
+    longitudes = []
+    
+    for country in df[country_col]:
+        if country in coordinates:
+            latitudes.append(coordinates[country]['latitude'])
+            longitudes.append(coordinates[country]['longitude'])
+        else:
+            latitudes.append(None)
+            longitudes.append(None)
+    
+    df['latitude'] = latitudes
+    df['longitude'] = longitudes
+    return df
+
+# Generate plot with Plotly Express
+# Generate plot with Plotly Express
 # Generate plot with Plotly Express
 def generate_plot(result, plot_type, x, y, title):
+    # Ensure string column is on the x-axis and numeric column is on the y-axis
+    if result[x].dtype != 'object' and result[y].dtype == 'object':
+        x, y = y, x
+
     if plot_type == 'bar':
         fig = px.bar(result, x=x, y=y, title=title)
     elif plot_type == 'line':
@@ -156,6 +219,21 @@ def generate_plot(result, plot_type, x, y, title):
         fig = px.imshow(result.corr(), title=title)
     elif plot_type == 'violin':
         fig = px.violin(result, x=x, y=y, title=title)
+    elif plot_type == 'map':
+        # Add latitude and longitude if the country column exists
+        if 'country' in [x, y]:
+            result = add_lat_lon_static(result, 'country')
+            if 'latitude' in result.columns and 'longitude' in result.columns:
+                if result[y].dtype != 'object':
+                    fig = px.scatter_mapbox(result, lat='latitude', lon='longitude', title=title, mapbox_style="carto-positron", size=y)
+                else:
+                    fig = px.scatter_mapbox(result, lat='latitude', lon='longitude', title=title, mapbox_style="carto-positron")
+            else:
+                st.error("Failed to add latitude and longitude for the country names.")
+                fig = None
+        else:
+            st.error("Map chart requires 'country' as one of the attributes.")
+            fig = None
     return fig
 
 # Streamlit application
@@ -177,6 +255,10 @@ if uploaded_file is not None:
     # Automatically display overall summary of the data
     summary = generate_summary(data)
     display_summary(summary)
+    
+    descriptive_summary = generate_descriptive_summary(data)
+    with st.expander("Statictics:"):
+        st.write(descriptive_summary)
 
     # Text input for user query
     user_query = st.text_input("Query", key='user_query')
@@ -208,13 +290,17 @@ if uploaded_file is not None:
                             elif "date" in user_query or "time" in user_query:
                                 result = data.groupby(corrected_attributes[0])[corrected_attributes[1]].sum().reset_index()
                                 title = f'{corrected_attributes[1]} Over Time'
+                            elif "map" in user_query:
+                                result = data
+                                title = f'Map of {corrected_attributes[0]}'
                             else:
                                 result = data.groupby(corrected_attributes[0])[corrected_attributes[1]].sum().reset_index()
                                 title = f'{corrected_attributes[1]} by {corrected_attributes[0]}'
                             
                             if result is not None:
                                 fig = generate_plot(result, chart_type, corrected_attributes[0], corrected_attributes[1], title)
-                                st.plotly_chart(fig)
+                                if fig:
+                                    st.plotly_chart(fig)
                             else:
                                 st.error("No data to display for the given query.")
                         except KeyError as e:
@@ -222,7 +308,12 @@ if uploaded_file is not None:
                         except IndexError as e:
                             st.error(f"IndexError: {e}. This might be due to an incorrect number of attributes extracted from the query.")
                 else:
-                    st.error("Query not understood. Please try again.")
+                    # Generate descriptive summary if the intent is detected as an overview or performance query
+                    if "performance" in user_query or "overview" in user_query or "how is my" in user_query:
+                        descriptive_summary = generate_descriptive_summary(data)
+                        st.write("Data Summary:")
+                        st.write(descriptive_summary)
+                    else:
+                        st.error("Query not understood. Please try again.")
 
-                st.success('Done!')
-
+            st.success('Done!')
