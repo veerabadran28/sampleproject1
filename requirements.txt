@@ -5,3 +5,1121 @@ boto3==1.34.112
 python-Levenshtein==0.25.1
 pygwalker==0.4.8.8
 pyperclip==1.8.2
+
+=========================
+
+import streamlit as st
+import os
+import pandas as pd
+import base64
+from PyPDF2 import PdfReader
+import re
+from datetime import datetime
+import boto3
+import json
+from io import StringIO
+import time
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Literal, NamedTuple
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import numpy as np
+import logging
+import tempfile
+from pathlib import Path
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+import fitz  # PyMuPDF
+import docx
+import csv
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Data Structures
+@dataclass
+class DocumentChunk:
+    """Represents a chunk of text from a document"""
+    content: str
+    chunk_index: int
+    total_chunks: int
+    source_reference: str
+    metadata: Dict
+
+@dataclass
+class DocumentSection:
+    """Represents a section of a document with metadata"""
+    content: str
+    source: str
+    text_type: str
+    location: Dict
+    chunks: List[DocumentChunk] = None
+
+class ChatMessage:
+    """Represents a chat message with metadata"""
+    def __init__(self, role: Literal["user", "assistant"], content: str):
+        self.role = role
+        self.content = content
+        self.timestamp = time.time()
+
+# AWS Bedrock Configuration
+class BedrockConfig:
+    """Manages AWS Bedrock configuration and interactions"""
+    
+    def __init__(self, region_name: str = 'us-east-1'):
+        """Initialize Bedrock client"""
+        try:
+            self.client = boto3.client(
+                service_name='bedrock-runtime',
+                region_name=region_name
+            )
+            self.max_tokens_per_chunk = 4000
+            self.chunk_overlap = 200
+            logger.info("AWS Bedrock client initialized successfully")
+        except Exception as e:
+            logger.error(f"Error initializing AWS Bedrock client: {str(e)}")
+            raise
+
+    def get_response(
+        self,
+        prompt: str,
+        context: str = "",
+        temperature: float = 0.7
+    ) -> Optional[str]:
+        """
+        Get response from Claude model
+        
+        Args:
+            prompt (str): User's question or prompt
+            context (str): Additional context for the prompt
+            temperature (float): Response temperature (0.0-1.0)
+            
+        Returns:
+            Optional[str]: Claude's response or None if error
+        """
+        try:
+            body = json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 4096,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": f"Context: {context}\n\nQuestion: {prompt}"
+                    }
+                ],
+                "temperature": temperature
+            })
+            
+            response = self.client.invoke_model(
+                modelId='anthropic.claude-3-sonnet-20240229-v1:0',
+                body=body
+            )
+            response_body = json.loads(response['body'].read())
+            return response_body['content'][0]['text']
+        except Exception as e:
+            logger.error(f"Error calling Claude: {str(e)}")
+            return None
+
+class TextChunkManager:
+    """Manages text chunking and processing"""
+    
+    def __init__(
+        self,
+        chunk_size: int = 4000,
+        chunk_overlap: int = 200
+    ):
+        """
+        Initialize text chunk manager
+        
+        Args:
+            chunk_size (int): Maximum size of each text chunk
+            chunk_overlap (int): Number of characters to overlap between chunks
+        """
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            length_function=len,
+            separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]
+        )
+    
+    def create_chunks(
+        self,
+        text: str,
+        source: str,
+        metadata: Dict = None
+    ) -> List[DocumentChunk]:
+        """
+        Split text into chunks with metadata
+        
+        Args:
+            text (str): Text to split
+            source (str): Source reference for the text
+            metadata (Dict): Additional metadata for the chunks
+            
+        Returns:
+            List[DocumentChunk]: List of text chunks with metadata
+        """
+        try:
+            chunks = self.text_splitter.split_text(text)
+            
+            return [
+                DocumentChunk(
+                    content=chunk,
+                    chunk_index=i + 1,
+                    total_chunks=len(chunks),
+                    source_reference=source,
+                    metadata=metadata or {}
+                )
+                for i, chunk in enumerate(chunks)
+            ]
+        except Exception as e:
+            logger.error(f"Error creating chunks: {str(e)}")
+            raise
+
+class AppState:
+    """Manages application state and configuration"""
+    
+    def __init__(self):
+        """Initialize application state"""
+        self.initialize_session_state()
+        self.initialize_directories()
+        self.bedrock = BedrockConfig()
+        self.chunk_manager = TextChunkManager()
+    
+    @staticmethod
+    def initialize_session_state():
+        """Initialize or reset Streamlit session state variables"""
+        if "chat_messages" not in st.session_state:
+            st.session_state.chat_messages = []
+        if "current_file" not in st.session_state:
+            st.session_state.current_file = None
+        if "document_cache" not in st.session_state:
+            st.session_state.document_cache = {}
+        if "chunk_cache" not in st.session_state:
+            st.session_state.chunk_cache = {}
+    
+    @staticmethod
+    def initialize_directories():
+        """Create necessary directories for the application"""
+        directories = ['downloaded_files', 'temp', 'cache']
+        for directory in directories:
+            os.makedirs(directory, exist_ok=True)
+            logger.info(f"Directory initialized: {directory}")
+
+class FileValidator:
+    """Handles file validation and verification"""
+    
+    @staticmethod
+    def validate_file_name(filename: str) -> Tuple[bool, str]:
+        """Validate file name format"""
+        pattern = r'^(\d{4}-lbg-(hy|q[1-4])-(excel-download|results|ims))\.xlsx?|pdf$'
+        if not re.match(pattern, filename):
+            return False, "File name does not match the expected format."
+        
+        try:
+            year = int(filename[:4])
+            current_year = datetime.now().year
+            if year < 2000 or year > current_year:
+                return False, f"Invalid year in filename. Year should be between 2000 and {current_year}."
+        except ValueError:
+            return False, "Invalid year format in filename."
+        
+        return True, ""
+
+    @staticmethod
+    def validate_file_content(file_path: str) -> Tuple[bool, str]:
+        """Validate file content"""
+        try:
+            if file_path.endswith(('.xlsx', '.xls')):
+                return FileValidator._validate_excel_content(file_path)
+            elif file_path.endswith('.pdf'):
+                return FileValidator._validate_pdf_content(file_path)
+            else:
+                return False, "Unsupported file type."
+        except Exception as e:
+            logger.error(f"Error validating file content: {str(e)}")
+            return False, str(e)
+
+    @staticmethod
+    def _validate_excel_content(file_path: str) -> Tuple[bool, str]:
+        """Validate Excel file content"""
+        try:
+            df = pd.read_excel(file_path, sheet_name=None)
+            
+            if 'Cover' not in df or 'Contents' not in df:
+                return False, "Excel file must contain 'Cover' and 'Contents' sheets."
+            
+            if len(df) <= 2:
+                return False, "Excel file must contain data sheets."
+            
+            return True, ""
+        except Exception as e:
+            return False, f"Error validating Excel content: {str(e)}"
+
+    @staticmethod
+    def _validate_pdf_content(file_path: str) -> Tuple[bool, str]:
+        """Validate PDF file content"""
+        try:
+            pdf_reader = PdfReader(file_path)
+            if len(pdf_reader.pages) == 0:
+                return False, "PDF file is empty."
+            
+            first_page_text = pdf_reader.pages[0].extract_text().lower()
+            if "lloyds banking group" not in first_page_text:
+                return False, "PDF content does not match expected format."
+            
+            return True, ""
+        except Exception as e:
+            return False, f"Error validating PDF content: {str(e)}"
+
+class DocumentProcessor:
+    """Handles document processing and content extraction"""
+    
+    def __init__(self, chunk_manager: TextChunkManager):
+        """
+        Initialize document processor
+        
+        Args:
+            chunk_manager (TextChunkManager): Manager for text chunking
+        """
+        self.chunk_manager = chunk_manager
+        self.cache_dir = Path("cache")
+        self.cache_dir.mkdir(exist_ok=True)
+
+    def process_document(self, file_path: str) -> List[DocumentSection]:
+        """
+        Process document and extract content with chunking
+        
+        Args:
+            file_path (str): Path to the document
+            
+        Returns:
+            List[DocumentSection]: Processed document sections with chunks
+        """
+        # Check cache first
+        cache_key = self._generate_cache_key(file_path)
+        cached_result = self._get_from_cache(cache_key)
+        if cached_result:
+            logger.info(f"Retrieved cached content for {file_path}")
+            return cached_result
+
+        try:
+            if file_path.endswith(('.xlsx', '.xls')):
+                sections = self._process_excel(file_path)
+            elif file_path.endswith('.pdf'):
+                sections = self._process_pdf(file_path)
+            else:
+                raise ValueError("Unsupported file type")
+
+            # Process chunks for each section
+            for section in sections:
+                section.chunks = self.chunk_manager.create_chunks(
+                    section.content,
+                    section.source,
+                    {
+                        'text_type': section.text_type,
+                        'location': section.location
+                    }
+                )
+
+            # Cache the results
+            self._save_to_cache(cache_key, sections)
+            return sections
+
+        except Exception as e:
+            logger.error(f"Error processing document {file_path}: {str(e)}")
+            raise
+
+    def _process_pdf(self, file_path: str) -> List[DocumentSection]:
+        """Process PDF file with enhanced text extraction"""
+        sections = []
+        try:
+            doc = fitz.open(file_path)
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                # Extract text with improved formatting
+                text = page.get_text("text")
+                if text.strip():
+                    # Process text blocks
+                    blocks = page.get_text("blocks")
+                    for block_num, block in enumerate(blocks):
+                        if block[4].strip():  # block[4] contains the text
+                            sections.append(DocumentSection(
+                                content=block[4],
+                                source=f"Page {page_num + 1}, Block {block_num + 1}",
+                                text_type='pdf',
+                                location={
+                                    'page': page_num + 1,
+                                    'block': block_num + 1,
+                                    'bbox': block[:4],  # Coordinates of the block
+                                    'word_count': len(block[4].split())
+                                },
+                                chunks=None
+                            ))
+            return sections
+        except Exception as e:
+            logger.error(f"Error processing PDF {file_path}: {str(e)}")
+            raise
+
+    def _process_excel(self, file_path: str) -> List[DocumentSection]:
+        """Process Excel file with structured data handling"""
+        sections = []
+        try:
+            xl = pd.ExcelFile(file_path)
+            for sheet_name in xl.sheet_names:
+                if sheet_name not in ['Cover', 'Contents']:
+                    df = pd.read_excel(file_path, sheet_name=sheet_name)
+                    if not df.empty:
+                        # Process data in chunks
+                        chunk_size = 20
+                        for i in range(0, len(df), chunk_size):
+                            chunk = df.iloc[i:min(i + chunk_size, len(df))]
+                            # Convert chunk to string with proper formatting
+                            content = self._format_dataframe_chunk(chunk)
+                            if content.strip():
+                                sections.append(DocumentSection(
+                                    content=content,
+                                    source=f"Sheet '{sheet_name}', Rows {i+1}-{min(i + chunk_size, len(df))}",
+                                    text_type='excel',
+                                    location={
+                                        'sheet': sheet_name,
+                                        'start_row': i + 1,
+                                        'end_row': min(i + chunk_size, len(df)),
+                                        'columns': list(chunk.columns)
+                                    },
+                                    chunks=None
+                                ))
+            return sections
+        except Exception as e:
+            logger.error(f"Error processing Excel {file_path}: {str(e)}")
+            raise
+
+    @staticmethod
+    def _format_dataframe_chunk(df: pd.DataFrame) -> str:
+        """Format DataFrame chunk for text processing"""
+        buffer = StringIO()
+        df.to_string(buffer, index=False)
+        return buffer.getvalue()
+
+    def _generate_cache_key(self, file_path: str) -> str:
+        """Generate cache key based on file path and modification time"""
+        mtime = os.path.getmtime(file_path)
+        return f"{Path(file_path).stem}_{mtime}.json"
+
+class DocumentAnalyzer:
+    """Handles document analysis and insights generation"""
+    
+    def __init__(self, bedrock_client: BedrockConfig):
+        """
+        Initialize analyzer
+        
+        Args:
+            bedrock_client (BedrockConfig): Bedrock client for AI analysis
+        """
+        self.bedrock = bedrock_client
+
+    def analyze_document(self, sections: List[DocumentSection]) -> Dict:
+        """
+        Perform comprehensive document analysis
+        
+        Args:
+            sections (List[DocumentSection]): Document sections to analyze
+            
+        Returns:
+            Dict: Analysis results
+        """
+        try:
+            # Combine relevant chunks for analysis
+            text_content = self._prepare_content(sections)
+            
+            # Generate insights using Claude
+            insights = self._generate_insights(text_content)
+            
+            # Calculate statistics
+            stats = self._calculate_statistics(sections)
+            
+            return {
+                'insights': insights,
+                'statistics': stats,
+                'section_count': len(sections),
+                'total_chunks': sum(len(s.chunks) if s.chunks else 0 for s in sections)
+            }
+        except Exception as e:
+            logger.error(f"Error analyzing document: {str(e)}")
+            raise
+
+    def _prepare_content(self, sections: List[DocumentSection]) -> str:
+        """Prepare content for analysis"""
+        content_parts = []
+        for section in sections:
+            if section.chunks:
+                # Use chunked content
+                for chunk in section.chunks:
+                    content_parts.append(f"[{chunk.source_reference}]\n{chunk.content}")
+            else:
+                # Use full section content
+                content_parts.append(f"[{section.source}]\n{section.content}")
+        return "\n\n".join(content_parts)
+
+    def _generate_insights(self, content: str) -> Dict:
+        """Generate insights using Claude"""
+        prompt = """
+        Analyze this document content and provide:
+        1. Key themes and topics
+        2. Main findings or conclusions
+        3. Important metrics or numbers
+        4. Notable trends or patterns
+        5. Areas requiring attention
+        
+        Format the response as a structured JSON with these categories.
+        """
+        
+        try:
+            response = self.bedrock.get_response(prompt, content)
+            if response:
+                return json.loads(response)
+            return {}
+        except Exception as e:
+            logger.error(f"Error generating insights: {str(e)}")
+            return {}
+
+    def _calculate_statistics(self, sections: List[DocumentSection]) -> Dict:
+        """Calculate document statistics"""
+        stats = {
+            'by_type': {},
+            'word_counts': [],
+            'chunk_counts': []
+        }
+        
+        for section in sections:
+            # Count by type
+            stats['by_type'][section.text_type] = stats['by_type'].get(section.text_type, 0) + 1
+            
+            # Word counts
+            word_count = len(section.content.split())
+            stats['word_counts'].append(word_count)
+            
+            # Chunk counts
+            if section.chunks:
+                stats['chunk_counts'].append(len(section.chunks))
+        
+        # Calculate averages
+        stats['avg_word_count'] = sum(stats['word_counts']) / len(stats['word_counts']) if stats['word_counts'] else 0
+        stats['avg_chunk_count'] = sum(stats['chunk_counts']) / len(stats['chunk_counts']) if stats['chunk_counts'] else 0
+        
+        return stats
+
+class RelevanceScorer:
+    """Handles scoring and selection of relevant chunks"""
+    
+    @staticmethod
+    def select_relevant_chunks(
+        query: str,
+        sections: List[DocumentSection],
+        max_chunks: int = 5
+    ) -> List[DocumentChunk]:
+        """
+        Select most relevant chunks for a query
+        
+        Args:
+            query (str): User's question
+            sections (List[DocumentSection]): Available sections
+            max_chunks (int): Maximum chunks to return
+            
+        Returns:
+            List[DocumentChunk]: Most relevant chunks
+        """
+        all_chunks = []
+        for section in sections:
+            if section.chunks:
+                all_chunks.extend(section.chunks)
+        
+        # Score chunks based on relevance
+        scored_chunks = []
+        query_words = set(query.lower().split())
+        
+        for chunk in all_chunks:
+            chunk_words = set(chunk.content.lower().split())
+            score = len(query_words.intersection(chunk_words))
+            scored_chunks.append((score, chunk))
+        
+        # Sort by score and select top chunks
+        scored_chunks.sort(reverse=True)
+        return [chunk for _, chunk in scored_chunks[:max_chunks]]
+
+class UIManager:
+    """Manages UI components and styling"""
+    
+    @staticmethod
+    def apply_custom_css():
+        """Apply custom CSS styling"""
+        st.markdown("""
+            <style>
+            .chat-message {
+                padding: 1.5rem;
+                border-radius: 0.5rem;
+                margin-bottom: 1rem;
+                display: flex;
+                align-items: flex-start;
+                gap: 1rem;
+            }
+            
+            .user-message {
+                background: linear-gradient(to right, #DCF2F1, #e5e5f7);
+                margin-left: 20%;
+            }
+            
+            .assistant-message {
+                background: linear-gradient(to right, #F5F5F5, #e5e5f7);
+                margin-right: 20%;
+            }
+            
+            .message-avatar {
+                width: 40px;
+                height: 40px;
+                border-radius: 50%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 20px;
+            }
+            
+            .document-viewer {
+                border: 1px solid #ddd;
+                border-radius: 0.5rem;
+                padding: 1rem;
+                margin: 1rem 0;
+            }
+            
+            .highlighted-text {
+                background-color: #fff3cd;
+                padding: 0.2rem;
+                border-radius: 0.2rem;
+            }
+            
+            .source-reference {
+                color: #1E88E5;
+                font-size: 0.9em;
+                cursor: pointer;
+            }
+            
+            .analysis-card {
+                background: white;
+                padding: 1.5rem;
+                border-radius: 0.5rem;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                margin-bottom: 1rem;
+            }
+            
+            .header-section {
+                background: linear-gradient(to right, #1E88E5, #1565C0);
+                color: white;
+                padding: 2rem;
+                border-radius: 0.5rem;
+                margin-bottom: 2rem;
+            }
+            </style>
+        """, unsafe_allow_html=True)
+
+class ChatInterface:
+    """Handles chat interface and interactions"""
+    
+    def __init__(self, bedrock_client: BedrockConfig, relevance_scorer: RelevanceScorer):
+        """
+        Initialize chat interface
+        
+        Args:
+            bedrock_client (BedrockConfig): Client for Claude interactions
+            relevance_scorer (RelevanceScorer): Scorer for chunk selection
+        """
+        self.bedrock = bedrock_client
+        self.relevance_scorer = relevance_scorer
+        self.message_container = st.container()
+
+    def display_message(self, message: ChatMessage):
+        """Display a chat message"""
+        message_class = "user-message" if message.role == "user" else "assistant-message"
+        avatar = "🧑‍💼" if message.role == "user" else "🤖"
+        
+        with self.message_container:
+            st.markdown(f"""
+                <div class="chat-message {message_class}">
+                    <div class="message-avatar">{avatar}</div>
+                    <div class="message-content">{message.content}</div>
+                </div>
+            """, unsafe_allow_html=True)
+
+    def handle_user_input(self, sections: List[DocumentSection]):
+        """Handle user input and generate responses"""
+        if prompt := st.chat_input("Ask a question about the document..."):
+            # Add and display user message
+            user_msg = ChatMessage(role="user", content=prompt)
+            st.session_state.chat_messages.append(user_msg)
+            self.display_message(user_msg)
+            
+            try:
+                with st.spinner("Processing your question..."):
+                    # Select relevant chunks
+                    relevant_chunks = self.relevance_scorer.select_relevant_chunks(
+                        prompt, sections
+                    )
+                    
+                    # Generate response
+                    response = self._generate_response(prompt, relevant_chunks)
+                    
+                    if response:
+                        # Format and display response
+                        formatted_response = self._format_response(
+                            response,
+                            relevant_chunks
+                        )
+                        assistant_msg = ChatMessage(
+                            role="assistant",
+                            content=formatted_response
+                        )
+                        st.session_state.chat_messages.append(assistant_msg)
+                        self.display_message(assistant_msg)
+                    else:
+                        st.error("Unable to generate response. Please try again.")
+                        
+            except Exception as e:
+                logger.error(f"Error processing chat: {str(e)}")
+                st.error("An error occurred while processing your question.")
+
+    def _generate_response(
+        self,
+        prompt: str,
+        chunks: List[DocumentChunk]
+    ) -> Optional[str]:
+        """Generate response using selected chunks"""
+        try:
+            context = "\n\n".join([
+                f"[{chunk.source_reference}]\n{chunk.content}"
+                for chunk in chunks
+            ])
+            
+            response = self.bedrock.get_response(prompt, context)
+            return response
+        except Exception as e:
+            logger.error(f"Error generating response: {str(e)}")
+            return None
+
+    def _format_response(
+        self,
+        response: str,
+        chunks: List[DocumentChunk]
+    ) -> str:
+        """Format response with references and highlights"""
+        # Add source references
+        sources_used = "\n".join([
+            f'<div class="source-reference" onclick="highlight_source(\'{chunk.source_reference}\')">'
+            f'📄 {chunk.source_reference}</div>'
+            for chunk in chunks
+        ])
+        
+        formatted_response = f"""
+        <div class="response-container">
+            <div class="answer-section">
+                {response}
+            </div>
+            
+            <div class="sources-section">
+                <h4>Sources Referenced:</h4>
+                {sources_used}
+            </div>
+        </div>
+        """
+        
+        return formatted_response
+
+class DocumentViewer:
+    """Handles document viewing and navigation"""
+    
+    def __init__(self):
+        """Initialize document viewer"""
+        self.current_page = 1
+        self.zoom_level = 1.0
+
+    def display_document(self, file_path: str, sections: List[DocumentSection]):
+        """Display document with navigation"""
+        if file_path.endswith('.pdf'):
+            self._display_pdf(file_path)
+        else:
+            self._display_excel(file_path)
+        
+        # Display sections with highlighting
+        if st.session_state.get('highlighted_section'):
+            self._display_highlighted_section(sections)
+
+    def _display_pdf(self, file_path: str):
+        """Display PDF with controls"""
+        try:
+            doc = fitz.open(file_path)
+            
+            # Navigation controls
+            cols = st.columns([1, 3, 1])
+            with cols[0]:
+                if st.button("⬅️ Previous"):
+                    self.current_page = max(1, self.current_page - 1)
+            
+            with cols[1]:
+                st.write(f"Page {self.current_page} of {doc.page_count}")
+            
+            with cols[2]:
+                if st.button("Next ➡️"):
+                    self.current_page = min(doc.page_count, self.current_page + 1)
+            
+            # Zoom controls
+            zoom_cols = st.columns([1, 4])
+            with zoom_cols[0]:
+                if st.button("🔍 Zoom In"):
+                    self.zoom_level = min(2.0, self.zoom_level + 0.1)
+            with zoom_cols[1]:
+                if st.button("🔍 Zoom Out"):
+                    self.zoom_level = max(0.5, self.zoom_level - 0.1)
+            
+            # Display page
+            page = doc[self.current_page - 1]
+            pix = page.get_pixmap(matrix=fitz.Matrix(self.zoom_level, self.zoom_level))
+            img_data = pix.tobytes("png")
+            st.image(img_data, use_container_width=True)
+            
+        except Exception as e:
+            logger.error(f"Error displaying PDF: {str(e)}")
+            st.error("Error displaying PDF document.")
+
+    def _display_excel(self, file_path: str):
+        """Display Excel with controls"""
+        try:
+            xl = pd.ExcelFile(file_path)
+            sheet_names = [
+                sheet for sheet in xl.sheet_names
+                if sheet not in ["Cover", "Contents"]
+            ]
+            
+            if not sheet_names:
+                st.warning("No data sheets found.")
+                return
+            
+            # Sheet selection
+            selected_sheet = st.selectbox(
+                "Select sheet:",
+                sheet_names
+            )
+            
+            # Read and display data
+            df = pd.read_excel(file_path, sheet_name=selected_sheet)
+            st.dataframe(df, use_container_width=True)
+            
+            # Export options
+            cols = st.columns(2)
+            with cols[0]:
+                csv = df.to_csv(index=False)
+                st.download_button(
+                    label="Download as CSV",
+                    data=csv,
+                    file_name=f"{selected_sheet}.csv",
+                    mime="text/csv"
+                )
+            
+        except Exception as e:
+            logger.error(f"Error displaying Excel: {str(e)}")
+            st.error("Error displaying Excel file.")
+
+    def _display_highlighted_section(self, sections: List[DocumentSection]):
+        """Display highlighted section"""
+        highlighted = st.session_state.highlighted_section
+        for section in sections:
+            if section.source == highlighted:
+                st.markdown("""
+                    <div class="highlighted-section">
+                        <h4>Referenced Section:</h4>
+                        <div class="highlighted-text">{section.content}</div>
+                    </div>
+                """, unsafe_allow_html=True)
+                break
+
+class DocumentAssistantApp:
+    """Main application class that integrates all components"""
+    
+    def __init__(self):
+        """Initialize application and its components"""
+        try:
+            # Initialize core components
+            self.app_state = AppState()
+            self.bedrock_client = BedrockConfig()
+            self.chunk_manager = TextChunkManager()
+            self.relevance_scorer = RelevanceScorer()
+            
+            # Initialize processors
+            self.document_processor = DocumentProcessor(self.chunk_manager)
+            self.document_analyzer = DocumentAnalyzer(self.bedrock_client)
+            
+            # Initialize UI components
+            self.ui_manager = UIManager()
+            self.chat_interface = ChatInterface(
+                self.bedrock_client,
+                self.relevance_scorer
+            )
+            self.document_viewer = DocumentViewer()
+            
+            # Apply custom styling
+            self.ui_manager.apply_custom_css()
+            
+            logger.info("Application initialized successfully")
+        except Exception as e:
+            logger.error(f"Error initializing application: {str(e)}")
+            raise
+
+    def run(self):
+        """Main application execution flow"""
+        try:
+            self._display_header()
+            self._create_sidebar()
+            
+            # Handle file upload
+            uploaded_file = self._handle_file_upload()
+            if uploaded_file:
+                self._process_and_display_document(uploaded_file)
+            
+        except Exception as e:
+            logger.error(f"Application error: {str(e)}")
+            st.error("An error occurred. Please try again or contact support.")
+
+    def _display_header(self):
+        """Display application header"""
+        st.markdown(
+            """
+            <div class="header-section">
+                <h1>Document Analysis Assistant</h1>
+                <p>Intelligent document analysis and Q&A powered by Claude</p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    def _create_sidebar(self):
+        """Create and configure sidebar"""
+        with st.sidebar:
+            st.title("Settings & Controls")
+            
+            # Model settings
+            st.header("Model Configuration")
+            temperature = st.slider(
+                "Response Temperature",
+                0.0, 1.0, 0.7,
+                help="Higher values make responses more creative"
+            )
+            st.session_state.temperature = temperature
+            
+            # Document settings
+            st.header("Document Settings")
+            chunk_size = st.number_input(
+                "Chunk Size",
+                min_value=1000,
+                max_value=8000,
+                value=4000,
+                help="Maximum size of text chunks"
+            )
+            st.session_state.chunk_size = chunk_size
+            
+            # Cache management
+            st.header("Cache Management")
+            if st.button("Clear Cache"):
+                self._clear_cache()
+                st.success("Cache cleared successfully!")
+
+    def _handle_file_upload(self) -> Optional[str]:
+        """Handle file upload process"""
+        with st.expander("Upload Documents", expanded=True):
+            st.write("Please upload your documents for analysis:")
+            
+            files_to_upload = [
+                "2024-lbg-hy-excel-download.xlsx",
+                "2024-lbg-hy-results.pdf",
+                "2024-lbg-q1-excel-download.xlsx",
+                "2024-lbg-q1-ims.pdf"
+            ]
+            
+            uploaded_files = []
+            
+            for expected_filename in files_to_upload:
+                file_uploader_key = f"uploader_{expected_filename}"
+                uploaded_file = st.file_uploader(
+                    f"Upload {expected_filename}",
+                    type=['xlsx', 'pdf'],
+                    key=file_uploader_key
+                )
+                
+                if uploaded_file:
+                    try:
+                        # Validate and save file
+                        file_path = self._validate_and_save_file(
+                            uploaded_file,
+                            expected_filename
+                        )
+                        if file_path:
+                            uploaded_files.append(file_path)
+                            st.success(f"Successfully uploaded: {expected_filename}")
+                    
+                    except Exception as e:
+                        logger.error(f"Error uploading file: {str(e)}")
+                        st.error(f"Error processing upload: {str(e)}")
+            
+            return uploaded_files[0] if uploaded_files else None
+
+    def _validate_and_save_file(
+        self,
+        uploaded_file: st.UploadedFile,
+        expected_filename: str
+    ) -> Optional[str]:
+        """Validate and save uploaded file"""
+        try:
+            # Validate filename
+            is_valid_name, name_error = FileValidator.validate_file_name(
+                uploaded_file.name
+            )
+            if not is_valid_name:
+                st.error(f"Invalid file name: {name_error}")
+                return None
+            
+            # Save file
+            file_path = os.path.join("downloaded_files", expected_filename)
+            with open(file_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+            
+            # Validate content
+            is_valid_content, content_error = FileValidator.validate_file_content(
+                file_path
+            )
+            if not is_valid_content:
+                st.error(f"Invalid file content: {content_error}")
+                os.remove(file_path)
+                return None
+            
+            return file_path
+            
+        except Exception as e:
+            logger.error(f"Error validating file: {str(e)}")
+            raise
+
+    def _process_and_display_document(self, file_path: str):
+        """Process and display document with analysis"""
+        try:
+            # Process document
+            with st.spinner("Processing document..."):
+                sections = self.document_processor.process_document(file_path)
+            
+            # Create main tabs
+            doc_tab, analysis_tab, chat_tab = st.tabs([
+                "Document Viewer",
+                "Analysis",
+                "Chat"
+            ])
+            
+            with doc_tab:
+                self._display_document_tab(file_path, sections)
+            
+            with analysis_tab:
+                self._display_analysis_tab(sections)
+            
+            with chat_tab:
+                self._display_chat_tab(sections)
+                
+        except Exception as e:
+            logger.error(f"Error processing document: {str(e)}")
+            st.error("Error processing document. Please try again.")
+
+    def _display_document_tab(self, file_path: str, sections: List[DocumentSection]):
+        """Display document viewer tab"""
+        st.header("Document Viewer")
+        self.document_viewer.display_document(file_path, sections)
+
+    def _display_analysis_tab(self, sections: List[DocumentSection]):
+        """Display document analysis tab"""
+        st.header("Document Analysis")
+        
+        try:
+            with st.spinner("Analyzing document..."):
+                analysis = self.document_analyzer.analyze_document(sections)
+            
+            # Display metrics
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Sections", analysis['section_count'])
+            with col2:
+                st.metric("Total Chunks", analysis['total_chunks'])
+            with col3:
+                st.metric(
+                    "Avg Words per Section",
+                    f"{analysis['statistics']['avg_word_count']:.0f}"
+                )
+            
+            # Display insights
+            st.subheader("Key Insights")
+            if analysis['insights']:
+                for category, insights in analysis['insights'].items():
+                    with st.expander(category.title()):
+                        if isinstance(insights, list):
+                            for insight in insights:
+                                st.write(f"• {insight}")
+                        else:
+                            st.write(insights)
+            
+        except Exception as e:
+            logger.error(f"Error displaying analysis: {str(e)}")
+            st.error("Error generating document analysis.")
+
+    def _display_chat_tab(self, sections: List[DocumentSection]):
+        """Display chat interface tab"""
+        st.header("Chat with Your Document")
+        self.chat_interface.handle_user_input(sections)
+
+    def _clear_cache(self):
+        """Clear application cache and reset state"""
+        try:
+            # Clear file cache
+            cache_dir = self.document_processor.cache_dir
+            if cache_dir.exists():
+                for file in cache_dir.glob("*"):
+                    file.unlink()
+            
+            # Reset session state
+            st.session_state.chat_messages = []
+            st.session_state.current_file = None
+            st.session_state.document_cache = {}
+            st.session_state.chunk_cache = {}
+            
+            logger.info("Cache cleared successfully")
+            
+        except Exception as e:
+            logger.error(f"Error clearing cache: {str(e)}")
+            raise
+
+def main():
+    """Application entry point"""
+    try:
+        # Configure Streamlit page
+        st.set_page_config(
+            page_title="Document Analysis Assistant",
+            page_icon="📄",
+            layout="wide",
+            initial_sidebar_state="expanded"
+        )
+        
+        # Create and run application
+        app = DocumentAssistantApp()
+        app.run()
+        
+    except Exception as e:
+        logger.error(f"Application startup error: {str(e)}")
+        st.error(
+            "An error occurred while starting the application. "
+            "Please refresh the page or contact support."
+        )
+
+if __name__ == "__main__":
+    main()
