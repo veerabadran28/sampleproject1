@@ -26,3 +26,483 @@ python-docx
 textract
 python-calamine
 tiktoken
+
+import streamlit as st
+import os
+import pandas as pd
+import base64
+from PyPDF2 import PdfReader
+import re
+from datetime import datetime
+import boto3
+import json
+from io import StringIO
+from typing import Literal
+import time
+
+# Initialize AWS Bedrock client
+bedrock = boto3.client(
+    service_name='bedrock-runtime',
+    region_name='us-east-1'  # Replace with your region
+)
+
+# Custom message container styles
+def message_container(
+    message: str,
+    is_user: bool = False,
+    key: str = None,
+):
+    if is_user:
+        avatar_url = "🧑‍💼"  # User emoji
+        background_color = "linear-gradient(to right, #DCF2F1, #e5e5f7)"
+        align_message = "flex-end"
+        message_color = "#000000"
+    else:
+        avatar_url = "🤖"  # Assistant emoji
+        background_color = "linear-gradient(to right, #F5F5F5, #e5e5f7)"
+        align_message = "flex-start"
+        message_color = "#000000"
+
+    st.markdown(
+        f"""
+        <div style="
+            display: flex;
+            align-items: flex-start;
+            margin-bottom: 1rem;
+            justify-content: {align_message};
+            gap: 1rem;
+            ">
+            <div style="
+                min-width: 40px;
+                height: 40px;
+                border-radius: 50%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 20px;
+                ">
+                {avatar_url}
+            </div>
+            <div style="
+                background: {background_color};
+                padding: 1rem;
+                border-radius: 0.5rem;
+                max-width: 80%;
+                color: {message_color};
+                ">
+                {message}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+class ChatMessage:
+    def __init__(self, role: Literal["user", "assistant"], content: str):
+        self.role = role
+        self.content = content
+        self.timestamp = time.time()
+
+def get_claude_response(prompt, context=""):
+    """Get response from Claude model via AWS Bedrock"""
+    body = json.dumps({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 4096,
+        "messages": [
+            {
+                "role": "user",
+                "content": f"Context: {context}\n\nQuestion: {prompt}"
+            }
+        ],
+        "temperature": 0.7
+    })
+    
+    try:
+        response = bedrock.invoke_model(
+            modelId='anthropic.claude-3-sonnet-20240229-v1:0',
+            body=body
+        )
+        response_body = json.loads(response['body'].read())
+        return response_body['content'][0]['text']
+    except Exception as e:
+        st.error(f"Error calling Claude: {str(e)}")
+        return None
+
+def extract_text_from_pdf(file_path):
+    """Extract text content from PDF file"""
+    with open(file_path, 'rb') as file:
+        pdf = PdfReader(file)
+        text = ""
+        for page in pdf.pages:
+            text += page.extract_text()
+    return text
+
+def extract_text_from_excel(file_path):
+    """Extract text content from Excel file"""
+    dfs = pd.read_excel(file_path, sheet_name=None)
+    text = StringIO()
+    for sheet_name, df in dfs.items():
+        text.write(f"\nSheet: {sheet_name}\n")
+        text.write(df.to_string())
+    return text.getvalue()
+
+def get_document_content(file_path):
+    """Get content from either PDF or Excel file"""
+    if file_path.endswith('.pdf'):
+        return extract_text_from_pdf(file_path)
+    elif file_path.endswith(('.xlsx', '.xls')):
+        return extract_text_from_excel(file_path)
+    return ""
+
+def get_document_summary(file_path):
+    """Generate both short and detailed summaries using Claude"""
+    content = get_document_content(file_path)
+    
+    # Get short summary
+    short_prompt = "Provide a brief 2-3 sentence summary of the main points in this document."
+    short_summary = get_claude_response(short_prompt, content)
+    
+    # Get detailed summary
+    detailed_prompt = "Provide a detailed summary of this document, including key findings, important metrics, and notable trends. Format the response with appropriate headers and bullet points."
+    detailed_summary = get_claude_response(detailed_prompt, content)
+    
+    return short_summary, detailed_summary
+
+def initialize_chat_state():
+    """Initialize chat-related session state variables"""
+    if "chat_messages" not in st.session_state:
+        st.session_state.chat_messages = []
+    if "current_file" not in st.session_state:
+        st.session_state.current_file = None
+
+def display_chat_interface(file_path):
+    """Display the chat interface with message history"""
+    st.write("### Document Assistant")
+    st.write("Ask questions about the document and I'll help you find the answers.")
+    
+    # Initialize chat container
+    chat_container = st.container()
+    
+    # If file changed, reset chat
+    if st.session_state.current_file != file_path:
+        st.session_state.chat_messages = []
+        st.session_state.current_file = file_path
+    
+    # Display existing messages
+    with chat_container:
+        for msg in st.session_state.chat_messages:
+            message_container(
+                msg.content,
+                is_user=(msg.role == "user"),
+                key=f"{msg.role}_{msg.timestamp}"
+            )
+    
+    # Chat input
+    if prompt := st.chat_input("Ask your question about the document..."):
+        # Add user message
+        user_msg = ChatMessage(role="user", content=prompt)
+        st.session_state.chat_messages.append(user_msg)
+        message_container(prompt, is_user=True)
+        
+        # Get document content for context
+        doc_content = get_document_content(file_path)
+        
+        # Get and display Claude's response
+        response = get_claude_response(prompt, doc_content)
+        if response:
+            assistant_msg = ChatMessage(role="assistant", content=response)
+            st.session_state.chat_messages.append(assistant_msg)
+            message_container(response, is_user=False)
+        
+        # Force refresh
+        st.experimental_rerun()
+
+# [Previous code remains the same until the Display Uploaded Files section]
+
+# Initialize session state
+initialize_chat_state()
+
+# Streamlit UI setup
+st.set_page_config(page_title="GenAI Document Processing Solution", page_icon=":chart_with_upwards_trend:", layout="wide")
+
+# Create 'downloaded_files' directory if it doesn't exist
+if not os.path.exists('downloaded_files'):
+    os.makedirs('downloaded_files')
+
+# Expander for file uploads
+with st.expander("Upload Lloyds Banking Group Files"):
+    st.write("Please upload the following files:")
+    
+    files_to_upload = [
+        "2024-lbg-hy-excel-download.xlsx",
+        "2024-lbg-hy-results.pdf",
+        "2024-lbg-q1-excel-download.xlsx",
+        "2024-lbg-q1-ims.pdf"
+    ]
+    
+    uploaded_files = []
+    for filename in files_to_upload:
+        if upload_and_save_file(st.file_uploader, filename):
+            uploaded_files.append(filename)
+    
+    if uploaded_files:
+        st.success(f"Successfully uploaded: {', '.join(uploaded_files)}")
+
+with st.expander("Display Uploaded Files"):
+    if os.path.exists('downloaded_files'):
+        files = [f for f in os.listdir('downloaded_files') if os.path.isfile(os.path.join('downloaded_files', f))]
+        
+        if files:
+            selected_file = st.selectbox("Select a file to display:", files)
+            if selected_file:
+                file_path = os.path.join('downloaded_files', selected_file)
+                
+                # Display file content
+                display_file_content(file_path)
+                
+                # Generate and display summaries
+                with st.expander("Document Summary"):
+                    short_summary, detailed_summary = get_document_summary(file_path)
+                    st.write("### Quick Summary")
+                    st.write(short_summary)
+                
+                with st.expander("Detailed Analysis"):
+                    st.write("### Detailed Summary")
+                    st.write(detailed_summary)
+                
+                # Display chat interface
+                display_chat_interface(file_path)
+        else:
+            st.warning("No files found in the upload directory. Please upload files first.")
+    else:
+        st.warning("Upload directory not found. Please upload files first.")
+
+
+====================================================
+
+import streamlit as st
+import os
+import pandas as pd
+import base64
+from PyPDF2 import PdfReader
+import re
+from datetime import datetime
+
+def display_excel_content(file_path):
+    try:
+        xl = pd.ExcelFile(file_path)
+        sheet_names = [sheet for sheet in xl.sheet_names if sheet not in ["Cover", "Contents"]]
+        
+        st.write(f"Excel file: {os.path.basename(file_path)}")
+        
+        sheet_titles = {}
+        for sheet in sheet_names:
+            df = pd.read_excel(file_path, sheet_name=sheet, header=None)
+            if not df.empty:
+                sheet_titles[sheet] = df.iloc[0, 0]  # Get value from cell A1
+            else:
+                sheet_titles[sheet] = sheet
+
+        selected_title = st.selectbox("Select data to view:", list(sheet_titles.values()))
+        selected_sheet = [sheet for sheet, title in sheet_titles.items() if title == selected_title][0]
+        
+        # Read the Excel file, starting from row 3 as header
+        df = pd.read_excel(file_path, sheet_name=selected_sheet, header=2)
+        
+        # Remove columns that are completely null or blank
+        df = df.dropna(axis=1, how='all')
+        
+        # Remove columns where all values (excluding the header) are blank or null
+        df = df.loc[:, ~df.iloc[1:].isna().all()]
+        
+        # Remove rows that are completely null or blank
+        df = df.dropna(how='all')
+        
+        st.write(f"Displaying content of: {selected_title}")
+        st.dataframe(df)
+        
+        # Add download button for CSV
+        csv = df.to_csv(index=False)
+        st.download_button(
+            label="Download data as CSV",
+            data=csv,
+            file_name=f"{selected_title}.csv",
+            mime="text/csv",
+        )
+        
+        with open(file_path, "rb") as file:
+            st.download_button(
+                label="Download entire Excel file",
+                data=file,
+                file_name=os.path.basename(file_path),
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+    except Exception as e:
+        st.error(f"Error reading Excel file: {str(e)}")
+        with open(file_path, 'rb') as f:
+            st.download_button(
+                label="Download file for manual inspection",
+                data=f.read(),
+                file_name=os.path.basename(file_path),
+                mime="application/octet-stream"
+            )
+
+def display_pdf_content(file_path):
+    try:
+        # Embed the PDF file in the Streamlit app using the PDF.js viewer
+        with open(file_path, "rb") as file:
+            base64_pdf = base64.b64encode(file.read()).decode('utf-8')
+            pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="800" type="application/pdf"></iframe>'
+            st.markdown(pdf_display, unsafe_allow_html=True)
+        
+        # Provide a download button for the PDF file
+        with open(file_path, "rb") as file:
+            st.download_button(
+                label="Download entire PDF file",
+                data=file,
+                file_name=os.path.basename(file_path),
+                mime="application/pdf"
+            )
+    except Exception as e:
+        st.error(f"Error displaying PDF file: {str(e)}")
+        with open(file_path, 'rb') as f:
+            st.download_button(
+                label="Download file for manual inspection",
+                data=f.read(),
+                file_name=os.path.basename(file_path),
+                mime="application/octet-stream"
+            )
+
+def display_file_content(file_path):
+    _, file_extension = os.path.splitext(file_path)
+    
+    if file_extension.lower() in ['.xlsx', '.xls']:
+        display_excel_content(file_path)
+    elif file_extension.lower() == '.pdf':
+        display_pdf_content(file_path)
+    else:
+        st.error("Unsupported file type")
+
+def validate_file_name(filename):
+    # Check if the filename matches the expected format
+    pattern = r'^(\d{4}-lbg-(hy|q[1-4])-(excel-download|results|ims))\.xlsx?|pdf$'
+    if not re.match(pattern, filename):
+        return False, "File name does not match the expected format."
+    
+    # Extract year from filename and check if it's valid
+    year = int(filename[:4])
+    current_year = datetime.now().year
+    if year < 2000 or year > current_year:
+        return False, f"Invalid year in filename. Year should be between 2000 and {current_year}."
+    
+    return True, ""
+
+def validate_excel_content(file):
+    try:
+        df = pd.read_excel(file, sheet_name=None)
+        
+        # Check if 'Cover' and 'Contents' sheets exist
+        if 'Cover' not in df or 'Contents' not in df:
+            return False, "Excel file must contain 'Cover' and 'Contents' sheets."
+        
+        # Check if there are additional sheets besides 'Cover' and 'Contents'
+        if len(df) <= 2:
+            return False, "Excel file must contain data sheets in addition to 'Cover' and 'Contents'."
+        
+        # Check if data sheets have content starting from row 3
+        for sheet_name, sheet_df in df.items():
+            if sheet_name not in ['Cover', 'Contents']:
+                if sheet_df.shape[0] < 3 or sheet_df.iloc[2:].empty:
+                    return False, f"Sheet '{sheet_name}' does not contain data starting from row 3."
+        
+        return True, ""
+    except Exception as e:
+        return False, f"Error validating Excel content: {str(e)}"
+
+def validate_pdf_content(file):
+    try:
+        pdf_reader = PdfReader(file)
+        
+        # Check if PDF has content
+        if len(pdf_reader.pages) == 0:
+            return False, "PDF file is empty."
+        
+        # Check if first page contains expected text (customize as needed)
+        first_page_text = pdf_reader.pages[0].extract_text().lower()
+        if "lloyds banking group" not in first_page_text:
+            return False, "PDF content does not match expected format."
+        
+        return True, ""
+    except Exception as e:
+        return False, f"Error validating PDF content: {str(e)}"
+
+def upload_and_save_file(file_uploader, expected_filename):
+    uploaded_file = file_uploader(f"Upload {expected_filename}", type=['xlsx', 'pdf'])
+    if uploaded_file is not None:
+        # Validate file name
+        is_valid_name, name_error = validate_file_name(uploaded_file.name)
+        if not is_valid_name:
+            st.error(f"Invalid file name: {name_error}")
+            return False
+        
+        # Validate file content
+        if uploaded_file.name.endswith(('.xlsx', '.xls')):
+            is_valid_content, content_error = validate_excel_content(uploaded_file)
+        elif uploaded_file.name.endswith('.pdf'):
+            is_valid_content, content_error = validate_pdf_content(uploaded_file)
+        else:
+            st.error("Unsupported file type.")
+            return False
+        
+        if not is_valid_content:
+            st.error(f"Invalid file content: {content_error}")
+            return False
+        
+        # Save the file if all validations pass
+        file_path = os.path.join("downloaded_files", expected_filename)
+        with open(file_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        st.success(f"File {expected_filename} has been uploaded and saved.")
+        return True
+    return False
+
+# Streamlit UI setup
+st.set_page_config(page_title="GenAI Document Processing Solution", page_icon=":chart_with_upwards_trend:", layout="wide")
+
+# Create 'downloaded_files' directory if it doesn't exist
+if not os.path.exists('downloaded_files'):
+    os.makedirs('downloaded_files')
+
+# Expander for file uploads
+with st.expander("Upload Lloyds Banking Group Files"):
+    st.write("Please upload the following files:")
+    
+    files_to_upload = [
+        "2024-lbg-hy-excel-download.xlsx",
+        "2024-lbg-hy-results.pdf",
+        "2024-lbg-q1-excel-download.xlsx",
+        "2024-lbg-q1-ims.pdf"
+    ]
+    
+    uploaded_files = []
+    for filename in files_to_upload:
+        if upload_and_save_file(st.file_uploader, filename):
+            uploaded_files.append(filename)
+    
+    if uploaded_files:
+        st.success(f"Successfully uploaded: {', '.join(uploaded_files)}")
+
+with st.expander("Display Uploaded Files"):
+    if os.path.exists('downloaded_files'):
+        # Get only files, excluding directories
+        files = [f for f in os.listdir('downloaded_files') if os.path.isfile(os.path.join('downloaded_files', f))]
+        
+        if files:
+            selected_file = st.selectbox("Select a file to display:", files)
+            if selected_file:
+                file_path = os.path.join('downloaded_files', selected_file)
+                display_file_content(file_path)
+        else:
+            st.warning("No files found in the upload directory. Please upload files first.")
+    else:
+        st.warning("Upload directory not found. Please upload files first.")
