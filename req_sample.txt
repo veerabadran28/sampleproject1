@@ -26,6 +26,1082 @@ python-docx
 textract
 python-calamine
 tiktoken
+===================================================
+
+import streamlit as st
+import os
+import pandas as pd
+import base64
+from PyPDF2 import PdfReader
+import re
+from datetime import datetime
+import boto3
+import json
+from io import StringIO
+import time
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Literal
+import hashlib
+from functools import lru_cache
+from concurrent.futures import ThreadPoolExecutor
+import asyncio
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+# Configure page settings
+st.set_page_config(
+    page_title="Document Analysis Assistant",
+    page_icon="📄",
+    layout="wide"
+)
+
+# Cache configuration
+CACHE_TTL = 3600  # Cache time to live in seconds
+
+@dataclass
+class DocumentChunk:
+    """Represents a processed chunk of document"""
+    content: str
+    page_number: int  # For PDF, sheet name for Excel
+    chunk_number: int
+    source_reference: str
+
+@dataclass
+class ProcessedDocument:
+    """Represents a processed document with metadata"""
+    chunks: List[DocumentChunk]
+    summary: Optional[str] = None
+    detailed_summary: Optional[str] = None
+    metadata: Dict = None
+    cache_time: float = time.time()
+
+class CacheManager:
+    """Manages caching for document processing and responses"""
+    
+    def __init__(self):
+        """Initialize cache manager"""
+        if 'document_cache' not in st.session_state:
+            st.session_state.document_cache = {}
+        if 'response_cache' not in st.session_state:
+            st.session_state.response_cache = {}
+        if 'summary_cache' not in st.session_state:
+            st.session_state.summary_cache = {}
+
+    def get_document_cache(self, file_path: str) -> Optional[ProcessedDocument]:
+        """Get cached document if valid"""
+        cache_key = self._generate_cache_key(file_path)
+        cached_doc = st.session_state.document_cache.get(cache_key)
+        
+        if cached_doc and (time.time() - cached_doc.cache_time) < CACHE_TTL:
+            return cached_doc
+        return None
+
+    def set_document_cache(self, file_path: str, processed_doc: ProcessedDocument):
+        """Cache processed document"""
+        cache_key = self._generate_cache_key(file_path)
+        st.session_state.document_cache[cache_key] = processed_doc
+
+    @lru_cache(maxsize=100)
+    def get_response_cache(self, prompt: str, context_hash: str) -> Optional[str]:
+        """Get cached response if exists"""
+        cache_key = f"{prompt}:{context_hash}"
+        return st.session_state.response_cache.get(cache_key)
+
+    def set_response_cache(self, prompt: str, context_hash: str, response: str):
+        """Cache response"""
+        cache_key = f"{prompt}:{context_hash}"
+        st.session_state.response_cache[cache_key] = response
+
+    def _generate_cache_key(self, file_path: str) -> str:
+        """Generate cache key based on file content hash"""
+        try:
+            with open(file_path, 'rb') as f:
+                file_hash = hashlib.md5(f.read()).hexdigest()
+            return f"{os.path.basename(file_path)}_{file_hash}"
+        except Exception:
+            return os.path.basename(file_path)
+
+class BedrockClient:
+    """Manages AWS Bedrock interactions with performance optimizations"""
+    
+    def __init__(self):
+        """Initialize Bedrock client"""
+        self.client = boto3.client(
+            service_name='bedrock-runtime',
+            region_name='us-east-1'
+        )
+        self.cache_manager = CacheManager()
+        self.executor = ThreadPoolExecutor(max_workers=4)
+
+    async def get_response(
+        self,
+        prompt: str,
+        context: str,
+        temperature: float = 0.7
+    ) -> str:
+        """Get response from Claude asynchronously"""
+        context_hash = hashlib.md5(context.encode()).hexdigest()
+        
+        # Check cache first
+        cached_response = self.cache_manager.get_response_cache(prompt, context_hash)
+        if cached_response:
+            return cached_response
+
+        try:
+            # Prepare the prompt with source tracking
+            enhanced_prompt = self._prepare_prompt(prompt, context)
+            
+            # Get response from Bedrock
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.executor,
+                self._call_bedrock,
+                enhanced_prompt,
+                temperature
+            )
+            
+            # Cache the response
+            self.cache_manager.set_response_cache(prompt, context_hash, response)
+            return response
+
+        except Exception as e:
+            st.error(f"Error getting response: {str(e)}")
+            return ""
+
+    def _prepare_prompt(self, prompt: str, context: str) -> str:
+        """Prepare enhanced prompt with instructions"""
+        return f"""
+        Context: {context}
+
+        Question: {prompt}
+
+        Please provide a detailed answer based solely on the provided context.
+        Include specific page numbers or source references for any information used.
+        Format your response professionally with clear sections:
+
+        1. Direct Answer
+        2. Supporting Details
+        3. Source References
+
+        Make sure to cite specific parts of the document.
+        """
+
+    def _call_bedrock(self, prompt: str, temperature: float) -> str:
+        """Make actual call to Bedrock"""
+        try:
+            body = json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 4096,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                "temperature": temperature
+            })
+            
+            response = self.client.invoke_model(
+                modelId='anthropic.claude-3-sonnet-20240229-v1:0',
+                body=body
+            )
+            return json.loads(response['body'].read())['content'][0]['text']
+            
+        except Exception as e:
+            st.error(f"Bedrock API error: {str(e)}")
+            return ""
+
+class TextProcessor:
+    """Handles text processing and chunking"""
+    
+    def __init__(self):
+        """Initialize text processor"""
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=2000,
+            chunk_overlap=200,
+            length_function=len,
+            separators=["\n\n", "\n", ". ", "! ", "? ", ",", " ", ""]
+        )
+
+    def process_text(self, text: str, page_number: int) -> List[DocumentChunk]:
+        """Process text into chunks with page tracking"""
+        chunks = self.text_splitter.split_text(text)
+        return [
+            DocumentChunk(
+                content=chunk,
+                page_number=page_number,
+                chunk_number=i+1,
+                source_reference=f"Page {page_number}, Chunk {i+1}"
+            )
+            for i, chunk in enumerate(chunks)
+        ]
+
+    @staticmethod
+    def clean_text(text: str) -> str:
+        """Clean and normalize text"""
+        # Remove extra whitespace
+        text = ' '.join(text.split())
+        # Remove special characters
+        text = re.sub(r'[^\w\s.,!?-]', '', text)
+        return text
+
+class DocumentProcessor:
+    """Handles document processing with caching and optimization"""
+    
+    def __init__(self):
+        """Initialize document processor"""
+        self.text_processor = TextProcessor()
+        self.cache_manager = CacheManager()
+        self.bedrock_client = BedrockClient()
+
+    async def process_file(self, file_path: str) -> ProcessedDocument:
+        """Process file with caching"""
+        # Check cache first
+        cached_doc = self.cache_manager.get_document_cache(file_path)
+        if cached_doc:
+            return cached_doc
+
+        try:
+            # Process based on file type
+            if file_path.endswith(('.xlsx', '.xls')):
+                processed_doc = await self._process_excel(file_path)
+            elif file_path.endswith('.pdf'):
+                processed_doc = await self._process_pdf(file_path)
+            else:
+                raise ValueError("Unsupported file type")
+
+            # Generate summaries
+            summaries = await self._generate_summaries(processed_doc.chunks)
+            processed_doc.summary = summaries['short']
+            processed_doc.detailed_summary = summaries['detailed']
+
+            # Cache the processed document
+            self.cache_manager.set_document_cache(file_path, processed_doc)
+            return processed_doc
+
+        except Exception as e:
+            st.error(f"Error processing document: {str(e)}")
+            raise
+
+    async def _process_pdf(self, file_path: str) -> ProcessedDocument:
+        """Process PDF with page tracking"""
+        chunks = []
+        try:
+            pdf_reader = PdfReader(file_path)
+            
+            # Process pages in parallel
+            with ThreadPoolExecutor() as executor:
+                futures = []
+                for page_num, page in enumerate(pdf_reader.pages, 1):
+                    futures.append(
+                        executor.submit(
+                            self._process_page,
+                            page.extract_text(),
+                            page_num
+                        )
+                    )
+                
+                # Collect results
+                for future in futures:
+                    chunks.extend(future.result())
+
+            return ProcessedDocument(
+                chunks=chunks,
+                metadata={
+                    'total_pages': len(pdf_reader.pages),
+                    'file_type': 'pdf'
+                }
+            )
+
+        except Exception as e:
+            st.error(f"Error processing PDF: {str(e)}")
+            raise
+
+    def _process_page(self, text: str, page_num: int) -> List[DocumentChunk]:
+        """Process single PDF page"""
+        cleaned_text = self.text_processor.clean_text(text)
+        return self.text_processor.process_text(cleaned_text, page_num)
+
+    async def _process_excel(self, file_path: str) -> ProcessedDocument:
+        """Process Excel with sheet tracking"""
+        chunks = []
+        try:
+            xl = pd.ExcelFile(file_path)
+            sheets_data = {}
+
+            # Process each sheet
+            for sheet_name in xl.sheet_names:
+                if sheet_name not in ['Cover', 'Contents']:
+                    df = pd.read_excel(file_path, sheet_name=sheet_name, header=2)
+                    
+                    # Clean and process sheet
+                    df = df.dropna(how='all', axis=1).dropna(how='all', axis=0)
+                    sheet_text = df.to_string(index=False)
+                    
+                    sheet_chunks = self.text_processor.process_text(
+                        sheet_text,
+                        sheet_name
+                    )
+                    chunks.extend(sheet_chunks)
+                    
+                    # Store sheet metadata
+                    sheets_data[sheet_name] = {
+                        'row_count': len(df),
+                        'column_count': len(df.columns)
+                    }
+
+            return ProcessedDocument(
+                chunks=chunks,
+                metadata={
+                    'sheets': sheets_data,
+                    'file_type': 'excel'
+                }
+            )
+
+        except Exception as e:
+            st.error(f"Error processing Excel: {str(e)}")
+            raise
+
+    async def _generate_summaries(self, chunks: List[DocumentChunk]) -> Dict[str, str]:
+        """Generate document summaries"""
+        context = self._prepare_summary_context(chunks)
+        
+        # Generate summaries concurrently
+        tasks = [
+            self._generate_short_summary(context),
+            self._generate_detailed_summary(context)
+        ]
+        
+        short_summary, detailed_summary = await asyncio.gather(*tasks)
+        
+        return {
+            'short': short_summary,
+            'detailed': detailed_summary
+        }
+
+    async def _generate_short_summary(self, context: str) -> str:
+        """Generate short summary"""
+        prompt = """
+        Provide a brief 2-3 sentence summary of the main points in this document.
+        Focus on key findings and most important information.
+        """
+        return await self.bedrock_client.get_response(prompt, context, temperature=0.3)
+
+    async def _generate_detailed_summary(self, context: str) -> str:
+        """Generate detailed summary"""
+        prompt = """
+        Provide a detailed summary of this document, including:
+        1. Key findings and metrics
+        2. Important trends and patterns
+        3. Notable insights
+        4. Main conclusions
+
+        Format the response with clear sections and bullet points.
+        Include specific page/source references.
+        """
+        return await self.bedrock_client.get_response(prompt, context, temperature=0.3)
+
+    def _prepare_summary_context(self, chunks: List[DocumentChunk]) -> str:
+        """Prepare context for summary generation"""
+        return "\n\n".join([
+            f"[{chunk.source_reference}]\n{chunk.content}"
+            for chunk in chunks
+        ])
+
+class ContextManager:
+    """Manages context selection and optimization"""
+    
+    def __init__(self, max_context_chunks: int = 5):
+        """Initialize context manager"""
+        self.max_context_chunks = max_context_chunks
+
+    def select_relevant_chunks(
+        self,
+        query: str,
+        chunks: List[DocumentChunk]
+    ) -> List[DocumentChunk]:
+        """Select most relevant chunks for the query"""
+        # Calculate relevance scores
+        scored_chunks = [
+            (self._calculate_relevance(chunk, query), chunk)
+            for chunk in chunks
+        ]
+        
+        # Sort by relevance and select top chunks
+        scored_chunks.sort(reverse=True)
+        return [chunk for _, chunk in scored_chunks[:self.max_context_chunks]]
+
+    def _calculate_relevance(self, chunk: DocumentChunk, query: str) -> float:
+        """Calculate chunk relevance score"""
+        query_words = set(query.lower().split())
+        chunk_words = set(chunk.content.lower().split())
+        
+        # Calculate various relevance metrics
+        word_overlap = len(query_words.intersection(chunk_words))
+        word_overlap_ratio = word_overlap / len(query_words) if query_words else 0
+        
+        # You can adjust these weights based on importance
+        return (
+            word_overlap * 0.5 +
+            word_overlap_ratio * 0.3 +
+            (1 / (chunk.chunk_number + 1)) * 0.2  # Prefer earlier chunks
+        )
+
+    def prepare_context(
+        self,
+        chunks: List[DocumentChunk],
+        include_metadata: bool = True
+    ) -> str:
+        """Prepare context string from chunks"""
+        context_parts = []
+        
+        for chunk in chunks:
+            # Add source reference
+            context_parts.append(f"[{chunk.source_reference}]")
+            
+            # Add content
+            context_parts.append(chunk.content)
+            
+            # Add metadata if requested
+            if include_metadata:
+                context_parts.append(f"Source: {chunk.source_reference}")
+            
+            context_parts.append("\n")
+        
+        return "\n".join(context_parts)
+
+class DocumentDisplay:
+    """Handles document display with optimization"""
+    
+    @staticmethod
+    async def display_summaries(processed_doc: ProcessedDocument):
+        """Display document summaries"""
+        with st.expander("Quick Summary"):
+            if processed_doc.summary:
+                st.markdown(processed_doc.summary)
+            else:
+                st.info("Summary not available")
+
+        with st.expander("Detailed Analysis"):
+            if processed_doc.detailed_summary:
+                st.markdown(processed_doc.detailed_summary)
+            else:
+                st.info("Detailed analysis not available")
+
+    @staticmethod
+    def display_file_content(file_path: str):
+        """Display file content based on type"""
+        try:
+            if file_path.endswith(('.xlsx', '.xls')):
+                DocumentDisplay._display_excel(file_path)
+            elif file_path.endswith('.pdf'):
+                DocumentDisplay._display_pdf(file_path)
+            else:
+                st.error("Unsupported file type")
+        except Exception as e:
+            st.error(f"Error displaying file: {str(e)}")
+
+    @staticmethod
+    def _display_excel(file_path: str):
+        """Display Excel content"""
+        try:
+            xl = pd.ExcelFile(file_path)
+            sheet_names = [
+                sheet for sheet in xl.sheet_names
+                if sheet not in ["Cover", "Contents"]
+            ]
+            
+            if not sheet_names:
+                st.warning("No data sheets found.")
+                return
+            
+            selected_sheet = st.selectbox("Select sheet:", sheet_names)
+            df = pd.read_excel(file_path, sheet_name=selected_sheet, header=2)
+            df = df.dropna(how='all', axis=1).dropna(how='all', axis=0)
+            
+            st.dataframe(df, use_container_width=True)
+            
+            # Add download options
+            col1, col2 = st.columns(2)
+            with col1:
+                csv = df.to_csv(index=False)
+                st.download_button(
+                    "Download as CSV",
+                    csv,
+                    f"{selected_sheet}.csv",
+                    "text/csv"
+                )
+            
+        except Exception as e:
+            st.error(f"Error displaying Excel: {str(e)}")
+
+    @staticmethod
+    def _display_pdf(file_path: str):
+        """Display PDF content"""
+        try:
+            with open(file_path, "rb") as file:
+                pdf_bytes = file.read()
+            
+            # Display PDF viewer
+            st.download_button(
+                "Download PDF",
+                pdf_bytes,
+                file_name=os.path.basename(file_path),
+                mime="application/pdf"
+            )
+            
+            # Display text content
+            pdf_reader = PdfReader(file_path)
+            for page_num, page in enumerate(pdf_reader.pages, 1):
+                with st.expander(f"Page {page_num}"):
+                    st.markdown(page.extract_text())
+                    
+        except Exception as e:
+            st.error(f"Error displaying PDF: {str(e)}")
+
+class ChatInterface:
+    """Manages chat interface and response generation"""
+    
+    def __init__(self):
+        """Initialize chat interface"""
+        self.bedrock_client = BedrockClient()
+        self.context_manager = ContextManager()
+        self.cache_manager = CacheManager()
+        self._initialize_session_state()
+
+    def _initialize_session_state(self):
+        """Initialize session state for chat"""
+        if "chat_history" not in st.session_state:
+            st.session_state.chat_history = []
+        if "conversation_context" not in st.session_state:
+            st.session_state.conversation_context = []
+
+    async def handle_chat(self, processed_doc: ProcessedDocument):
+        """Handle chat interaction"""
+        self._display_chat_history()
+        
+        if prompt := st.chat_input("Ask a question about the document..."):
+            await self._process_user_message(prompt, processed_doc)
+
+    def _display_chat_history(self):
+        """Display chat history with formatting"""
+        for message in st.session_state.chat_history:
+            with st.chat_message(message["role"]):
+                if message["role"] == "assistant":
+                    self._display_assistant_response(message["content"])
+                else:
+                    st.markdown(message["content"])
+
+    def _display_assistant_response(self, response: Dict):
+        """Display formatted assistant response"""
+        # Display main answer
+        st.markdown(response["answer"])
+        
+        # Display sources in expander
+        with st.expander("View Sources"):
+            for source in response["sources"]:
+                st.markdown(f"**{source['reference']}**")
+                st.markdown(f"> {source['excerpt']}")
+
+    async def _process_user_message(
+        self,
+        prompt: str,
+        processed_doc: ProcessedDocument
+    ):
+        """Process user message and generate response"""
+        # Add user message to chat
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        st.session_state.chat_history.append({
+            "role": "user",
+            "content": prompt
+        })
+
+        # Generate response
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                response = await self._generate_response(
+                    prompt,
+                    processed_doc,
+                    st.session_state.conversation_context
+                )
+                
+                self._display_assistant_response(response)
+                
+                # Update conversation context
+                self._update_conversation_context(prompt, response)
+                
+                # Add to chat history
+                st.session_state.chat_history.append({
+                    "role": "assistant",
+                    "content": response
+                })
+
+    async def _generate_response(
+        self,
+        prompt: str,
+        processed_doc: ProcessedDocument,
+        conversation_context: List
+    ) -> Dict:
+        """Generate response with source tracking"""
+        try:
+            # Select relevant chunks
+            relevant_chunks = self.context_manager.select_relevant_chunks(
+                prompt,
+                processed_doc.chunks
+            )
+            
+            # Prepare context
+            context = self._prepare_enhanced_context(
+                prompt,
+                relevant_chunks,
+                conversation_context
+            )
+            
+            # Generate response
+            raw_response = await self.bedrock_client.get_response(
+                self._create_enhanced_prompt(prompt),
+                context
+            )
+            
+            # Parse and format response
+            formatted_response = self._parse_response(raw_response, relevant_chunks)
+            
+            return formatted_response
+            
+        except Exception as e:
+            st.error(f"Error generating response: {str(e)}")
+            return {
+                "answer": "I apologize, but I encountered an error generating the response.",
+                "sources": []
+            }
+
+    def _prepare_enhanced_context(
+        self,
+        prompt: str,
+        chunks: List[DocumentChunk],
+        conversation_context: List
+    ) -> str:
+        """Prepare enhanced context with conversation history"""
+        context_parts = []
+        
+        # Add relevant document chunks
+        context_parts.append("Document Context:")
+        for chunk in chunks:
+            context_parts.append(f"[{chunk.source_reference}]\n{chunk.content}")
+        
+        # Add recent conversation context if relevant
+        if conversation_context:
+            context_parts.append("\nRecent Conversation Context:")
+            for context in conversation_context[-3:]:  # Last 3 exchanges
+                context_parts.append(f"Q: {context['question']}")
+                context_parts.append(f"A: {context['answer']}\n")
+        
+        return "\n\n".join(context_parts)
+
+    def _create_enhanced_prompt(self, prompt: str) -> str:
+        """Create enhanced prompt with instructions"""
+        return f"""
+        Based on the provided document context and any relevant conversation history,
+        answer the following question: {prompt}
+
+        Please structure your response in the following format:
+        1. Clear and concise answer
+        2. Supporting details with specific page/source references
+        3. Relevant quotes from the document
+
+        For each piece of information, explicitly cite the source (page number or section).
+        Use direct quotes where appropriate to support your answer.
+        """
+
+    def _parse_response(
+        self,
+        raw_response: str,
+        chunks: List[DocumentChunk]
+    ) -> Dict:
+        """Parse and structure the response"""
+        # Extract answer and sources
+        answer_parts = []
+        sources = []
+        
+        # Split response into sections
+        sections = raw_response.split("\n\n")
+        
+        for section in sections:
+            if section.strip().startswith(("[", "Page", "Sheet")):
+                # This is a source reference
+                source_text = section.split("]")[0].strip("[]")
+                excerpt = section.split("]")[1].strip()
+                sources.append({
+                    "reference": source_text,
+                    "excerpt": excerpt
+                })
+            else:
+                # This is part of the answer
+                answer_parts.append(section)
+        
+        return {
+            "answer": "\n\n".join(answer_parts),
+            "sources": sources
+        }
+
+    def _update_conversation_context(
+        self,
+        question: str,
+        response: Dict
+    ):
+        """Update conversation context"""
+        st.session_state.conversation_context.append({
+            "question": question,
+            "answer": response["answer"]
+        })
+        
+        # Keep only last 5 exchanges for context
+        if len(st.session_state.conversation_context) > 5:
+            st.session_state.conversation_context.pop(0)
+
+class ResponseFormatter:
+    """Handles response formatting and styling"""
+    
+    @staticmethod
+    def format_message_markdown(message: Dict) -> str:
+        """Format chat message with markdown"""
+        if message["role"] == "user":
+            return f"🧑‍💼 **You**: {message['content']}"
+        else:
+            response = message["content"]
+            formatted_parts = ["🤖 **Assistant**:"]
+            
+            # Format answer
+            formatted_parts.append(response["answer"])
+            
+            # Format sources
+            if response["sources"]:
+                formatted_parts.append("\n**Sources Used:**")
+                for source in response["sources"]:
+                    formatted_parts.append(
+                        f"- {source['reference']}\n  > {source['excerpt']}"
+                    )
+            
+            return "\n\n".join(formatted_parts)
+
+    @staticmethod
+    def format_error_message(error: str) -> str:
+        """Format error message"""
+        return f"""
+        ❌ **Error**
+        
+        I apologize, but I encountered an error:
+        {error}
+        
+        Please try rephrasing your question or try again later.
+        """
+
+class DocumentAssistantApp:
+    """Main application class integrating all components"""
+    
+    def __init__(self):
+        """Initialize application components"""
+        try:
+            # Initialize core components
+            self.document_processor = DocumentProcessor()
+            self.chat_interface = ChatInterface()
+            self.cache_manager = CacheManager()
+            self.document_display = DocumentDisplay()
+            
+            # Set up async event loop
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
+            
+            logger.info("Application initialized successfully")
+        except Exception as e:
+            logger.error(f"Error initializing application: {str(e)}")
+            raise
+
+    async def run(self):
+        """Main application execution flow"""
+        try:
+            st.title("Document Analysis Assistant")
+            
+            # Create sidebar
+            self._create_sidebar()
+            
+            # Handle file upload and processing
+            uploaded_files = await self._handle_file_upload()
+            
+            if uploaded_files:
+                await self._process_and_display_files(uploaded_files)
+            
+        except Exception as e:
+            logger.error(f"Application error: {str(e)}")
+            st.error(
+                "An error occurred. Please refresh the page or contact support."
+            )
+
+    def _create_sidebar(self):
+        """Create and configure sidebar"""
+        with st.sidebar:
+            st.header("Settings & Controls")
+            
+            # Model settings
+            st.subheader("Response Settings")
+            st.session_state.temperature = st.slider(
+                "Response Creativity",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.7,
+                help="Higher values make responses more creative"
+            )
+            
+            # Context settings
+            st.subheader("Context Settings")
+            st.session_state.max_context = st.number_input(
+                "Max Context Chunks",
+                min_value=3,
+                max_value=10,
+                value=5,
+                help="Maximum number of context chunks to use"
+            )
+            
+            # Cache management
+            st.subheader("Cache Management")
+            if st.button("Clear Cache"):
+                self._clear_cache()
+                st.success("Cache cleared successfully!")
+            
+            # Performance metrics
+            if st.session_state.get('performance_metrics'):
+                st.subheader("Performance Metrics")
+                metrics = st.session_state.performance_metrics
+                st.metric("Average Response Time", f"{metrics['avg_response_time']:.2f}s")
+                st.metric("Cache Hit Rate", f"{metrics['cache_hit_rate']:.1%}")
+
+    async def _handle_file_upload(self) -> List[str]:
+        """Handle file upload with validation"""
+        uploaded_files = []
+        
+        with st.expander("Upload Documents", expanded=True):
+            st.write("Please upload the following files:")
+            
+            files_to_upload = [
+                "2024-lbg-hy-excel-download.xlsx",
+                "2024-lbg-hy-results.pdf",
+                "2024-lbg-q1-excel-download.xlsx",
+                "2024-lbg-q1-ims.pdf"
+            ]
+            
+            upload_tasks = []
+            for expected_filename in files_to_upload:
+                uploaded_file = st.file_uploader(
+                    f"Upload {expected_filename}",
+                    type=['xlsx', 'pdf'],
+                    key=f"uploader_{expected_filename}"
+                )
+                
+                if uploaded_file:
+                    task = self._process_upload(uploaded_file, expected_filename)
+                    upload_tasks.append(task)
+            
+            if upload_tasks:
+                with st.spinner("Processing uploads..."):
+                    results = await asyncio.gather(*upload_tasks)
+                    uploaded_files.extend([r for r in results if r])
+            
+            if uploaded_files:
+                st.success(f"Successfully uploaded {len(uploaded_files)} files")
+            
+            return uploaded_files
+
+    async def _process_upload(
+        self,
+        uploaded_file: st.UploadedFile,
+        expected_filename: str
+    ) -> Optional[str]:
+        """Process and validate uploaded file"""
+        try:
+            # Validate filename
+            is_valid_name, name_error = self._validate_filename(
+                uploaded_file.name
+            )
+            if not is_valid_name:
+                st.error(f"Invalid file name: {name_error}")
+                return None
+            
+            # Save file
+            file_path = os.path.join("downloaded_files", expected_filename)
+            with open(file_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+            
+            # Validate content
+            is_valid_content = await self._validate_content(file_path)
+            if not is_valid_content:
+                os.remove(file_path)
+                return None
+            
+            return file_path
+            
+        except Exception as e:
+            logger.error(f"Error processing upload: {str(e)}")
+            return None
+
+    async def _process_and_display_files(self, file_paths: List[str]):
+        """Process and display uploaded files"""
+        if not file_paths:
+            return
+            
+        # File selection
+        selected_file = st.selectbox(
+            "Select a file to analyze:",
+            file_paths,
+            format_func=lambda x: os.path.basename(x)
+        )
+        
+        if selected_file:
+            # Create main tabs
+            doc_tab, chat_tab = st.tabs(["Document View", "Chat"])
+            
+            # Process document
+            start_time = time.time()
+            processed_doc = await self.document_processor.process_file(
+                selected_file
+            )
+            processing_time = time.time() - start_time
+            
+            # Update performance metrics
+            self._update_performance_metrics(processing_time)
+            
+            with doc_tab:
+                # Display document content
+                self.document_display.display_file_content(selected_file)
+                
+                # Display summaries
+                await self.document_display.display_summaries(processed_doc)
+            
+            with chat_tab:
+                # Display chat interface
+                await self.chat_interface.handle_chat(processed_doc)
+
+    def _update_performance_metrics(self, processing_time: float):
+        """Update performance metrics"""
+        if 'performance_metrics' not in st.session_state:
+            st.session_state.performance_metrics = {
+                'processing_times': [],
+                'cache_hits': 0,
+                'total_requests': 0
+            }
+        
+        metrics = st.session_state.performance_metrics
+        metrics['processing_times'].append(processing_time)
+        metrics['total_requests'] += 1
+        
+        # Calculate averages
+        metrics['avg_response_time'] = sum(metrics['processing_times']) / len(metrics['processing_times'])
+        metrics['cache_hit_rate'] = metrics['cache_hits'] / metrics['total_requests']
+
+    def _validate_filename(self, filename: str) -> Tuple[bool, str]:
+        """Validate file name format"""
+        pattern = r'^(\d{4}-lbg-(hy|q[1-4])-(excel-download|results|ims))\.xlsx?|pdf$'
+        if not re.match(pattern, filename):
+            return False, "File name does not match the expected format."
+        
+        try:
+            year = int(filename[:4])
+            current_year = datetime.now().year
+            if year < 2000 or year > current_year:
+                return False, f"Invalid year in filename. Year should be between 2000 and {current_year}."
+        except ValueError:
+            return False, "Invalid year format in filename."
+        
+        return True, ""
+
+    async def _validate_content(self, file_path: str) -> bool:
+        """Validate file content"""
+        try:
+            if file_path.endswith(('.xlsx', '.xls')):
+                df = pd.read_excel(file_path, sheet_name=None)
+                if 'Cover' not in df or 'Contents' not in df:
+                    st.error("Excel file must contain 'Cover' and 'Contents' sheets.")
+                    return False
+            elif file_path.endswith('.pdf'):
+                pdf_reader = PdfReader(file_path)
+                if len(pdf_reader.pages) == 0:
+                    st.error("PDF file is empty.")
+                    return False
+                
+                first_page_text = pdf_reader.pages[0].extract_text().lower()
+                if "lloyds banking group" not in first_page_text:
+                    st.error("PDF content does not match expected format.")
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            st.error(f"Error validating file content: {str(e)}")
+            return False
+
+    def _clear_cache(self):
+        """Clear application cache"""
+        try:
+            # Clear all cache directories
+            cache_dir = Path("cache")
+            if cache_dir.exists():
+                for file in cache_dir.glob("*"):
+                    file.unlink()
+            
+            # Reset session state
+            st.session_state.chat_history = []
+            st.session_state.conversation_context = []
+            st.session_state.document_cache = {}
+            st.session_state.response_cache = {}
+            
+            # Reset performance metrics
+            st.session_state.performance_metrics = {
+                'processing_times': [],
+                'cache_hits': 0,
+                'total_requests': 0
+            }
+            
+            logger.info("Cache cleared successfully")
+            
+        except Exception as e:
+            logger.error(f"Error clearing cache: {str(e)}")
+            raise
+
+def main():
+    """Application entry point"""
+    try:
+        # Configure Streamlit page
+        st.set_page_config(
+            page_title="Document Analysis Assistant",
+            page_icon="📄",
+            layout="wide",
+            initial_sidebar_state="expanded"
+        )
+        
+        # Create and run application
+        app = DocumentAssistantApp()
+        asyncio.run(app.run())
+        
+    except Exception as e:
+        logger.error(f"Application startup error: {str(e)}")
+        st.error(
+            "An error occurred while starting the application. "
+            "Please refresh the page or contact support."
+        )
+
+if __name__ == "__main__":
+    main()
+
+
+
+=====================================================================================================================
+
+
+
+
+
+
+
+
 
 import streamlit as st
 import os
