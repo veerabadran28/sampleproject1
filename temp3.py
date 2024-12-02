@@ -156,7 +156,7 @@ def get_claude_response(prompt, context=""):
 
 def get_years_for_bank(bank_name):
     """Get available years for a bank"""
-    prefix = f"{BASE_PATH}/{bank_name.lower()}/processed/"
+    prefix = f"{BASE_PATH}/{bank_name.lower()}/"
     try:
         response = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix=prefix, Delimiter='/')
         years = []
@@ -171,7 +171,7 @@ def get_years_for_bank(bank_name):
 
 def get_periods_for_year(bank_name, year):
     """Get available periods for a bank and year"""
-    prefix = f"{BASE_PATH}/{bank_name.lower()}/processed/{year}/"
+    prefix = f"{BASE_PATH}/{bank_name.lower()}/{year}/"
     try:
         response = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix=prefix, Delimiter='/')
         periods = []
@@ -185,7 +185,7 @@ def get_periods_for_year(bank_name, year):
 
 def get_files_in_period(bank_name, year, period):
     """Get all files in a specific period"""
-    prefix = f"{BASE_PATH}/{bank_name.lower()}/processed/{year}/{period}/"
+    prefix = f"{BASE_PATH}/{bank_name.lower()}/{year}/{period}/"
     try:
         response = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix=prefix)
         files = []
@@ -259,7 +259,7 @@ def generate_document_summary(file_key, content):
     return short_summary, detailed_summary
 
 def initialize_chat_state():
-    #Initialize all session state variables
+    """Initialize all session state variables"""
     if "chat_messages" not in st.session_state:
         st.session_state.chat_messages = deque(maxlen=10)
     if "current_file" not in st.session_state:
@@ -274,6 +274,21 @@ def initialize_chat_state():
         st.session_state.current_period = {}  # Store period per bank
     if "selected_file_key" not in st.session_state:
         st.session_state.selected_file_key = None
+    if "file_cache" not in st.session_state:
+        st.session_state.file_cache = {}
+
+def cache_file_content(file_key):
+    """Cache file content when first loaded"""
+    if file_key not in st.session_state.file_cache:
+        try:
+            file_content = read_file_from_s3(file_key)
+            if file_content:
+                st.session_state.file_cache[file_key] = file_content
+                return file_content
+        except Exception as e:
+            st.error(f"Error caching file: {str(e)}")
+            return None
+    return st.session_state.file_cache.get(file_key)
 
 def get_cached_summaries(file_key, content):
     """Get summaries from cache or generate if not available"""
@@ -287,11 +302,17 @@ def get_cached_summaries(file_key, content):
     return st.session_state.summaries[file_key]['short'], st.session_state.summaries[file_key]['detailed']
 
 def clear_file_cache(file_key):
-    """Clear cache for a specific file"""
+    """Clear all caches related to a specific file"""
     if file_key in st.session_state.document_content:
         del st.session_state.document_content[file_key]
     if file_key in st.session_state.summaries:
         del st.session_state.summaries[file_key]
+    if file_key in st.session_state.file_cache:
+        del st.session_state.file_cache[file_key]
+    # Clear sheet titles and dataframe caches
+    cache_keys = [k for k in st.session_state.keys() if k.startswith(f"{file_key}_")]
+    for key in cache_keys:
+        del st.session_state[key]
     if st.session_state.current_file == file_key:
         st.session_state.current_file = None
 
@@ -299,41 +320,69 @@ def get_cached_document_content(file_key):
     """Get document content from cache or generate if not available"""
     if file_key not in st.session_state.document_content:
         print(f"Cache miss - Loading content for {file_key}")
-        content = get_document_content(file_key)
-        st.session_state.document_content[file_key] = content
-    return st.session_state.document_content[file_key]
+        # Use cached file content if available
+        file_content = st.session_state.file_cache.get(file_key)
+        if not file_content:
+            file_content = cache_file_content(file_key)
+            
+        if file_content:
+            if file_key.endswith('.pdf'):
+                content = extract_text_from_pdf(file_content)
+            elif file_key.endswith(('.xlsx', '.xls')):
+                content = extract_text_from_excel(file_content)
+            else:
+                content = ""
+            st.session_state.document_content[file_key] = content
+    return st.session_state.document_content.get(file_key, "")
 
 def display_excel_content(file_key):
     try:
-        file_content = read_file_from_s3(file_key)
+        # Use cached content instead of reading from S3 again
+        file_content = st.session_state.file_cache.get(file_key)
+        if not file_content:
+            file_content = cache_file_content(file_key)
+            
+        if not file_content:
+            st.error("Failed to load file content")
+            return
+
         xl = pd.ExcelFile(file_content)
         sheet_names = [sheet for sheet in xl.sheet_names if sheet not in ["Cover", "Contents"]]
 
         st.write(f"Excel file: {os.path.basename(file_key)}")
 
-        sheet_titles = {}
-        for sheet in sheet_names:
-            df = pd.read_excel(file_content, sheet_name=sheet, header=None)
-            if not df.empty:
-                sheet_titles[sheet] = df.iloc[0, 0]
-            else:
-                sheet_titles[sheet] = sheet
+        # Cache sheet titles
+        cache_key = f"{file_key}_sheet_titles"
+        if cache_key not in st.session_state:
+            sheet_titles = {}
+            for sheet in sheet_names:
+                df = pd.read_excel(file_content, sheet_name=sheet, header=None)
+                if not df.empty:
+                    sheet_titles[sheet] = df.iloc[0, 0]
+                else:
+                    sheet_titles[sheet] = sheet
+            st.session_state[cache_key] = sheet_titles
+        else:
+            sheet_titles = st.session_state[cache_key]
 
         selected_title = st.selectbox("Select data to view:", list(sheet_titles.values()))
         selected_sheet = [sheet for sheet, title in sheet_titles.items() if title == selected_title][0]
 
-        df = pd.read_excel(file_content, sheet_name=selected_sheet, header=2)
-        df = df.dropna(axis=1, how='all')
-        df = df.loc[:, ~df.iloc[1:].isna().all()]
-        df = df.dropna(how='all')
-
-        # Convert datetime objects to strings
-        df = df.map(lambda x: x.strftime('%Y-%m-%d') if isinstance(x, datetime) else x)
+        # Cache dataframe for each sheet
+        df_cache_key = f"{file_key}_{selected_sheet}_df"
+        if df_cache_key not in st.session_state:
+            df = pd.read_excel(file_content, sheet_name=selected_sheet, header=2)
+            df = df.dropna(axis=1, how='all')
+            df = df.loc[:, ~df.iloc[1:].isna().all()]
+            df = df.dropna(how='all')
+            df = df.map(lambda x: x.strftime('%Y-%m-%d') if isinstance(x, datetime) else x)
+            st.session_state[df_cache_key] = df
+        else:
+            df = st.session_state[df_cache_key]
 
         st.write(f"Displaying content of: {selected_title}")
         st.dataframe(df)
 
-        # Add download button for CSV
         csv = df.to_csv(index=False)
         st.download_button(
             label="Download data as CSV",
@@ -346,7 +395,15 @@ def display_excel_content(file_key):
 
 def display_pdf_content(file_key):
     try:
-        file_content = read_file_from_s3(file_key)
+        # Use cached content instead of reading from S3 again
+        file_content = st.session_state.file_cache.get(file_key)
+        if not file_content:
+            file_content = cache_file_content(file_key)
+            
+        if not file_content:
+            st.error("Failed to load file content")
+            return
+
         base64_pdf = base64.b64encode(file_content.getvalue()).decode('utf-8')
         pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="800" type="application/pdf"></iframe>'
         st.markdown(pdf_display, unsafe_allow_html=True)
@@ -434,33 +491,41 @@ def display_file_selection(bank_name):
             st.warning(f"No files available for {selected_period}")
             return None
 
-        file_options = [''] + [os.path.basename(f) for f in files]
-        file_index = 0
+        # Create a mapping of display names to full paths
+        file_mapping = {os.path.basename(f): f for f in files}
+        file_options = [''] + list(file_mapping.keys())
         
-        if (st.session_state.selected_file_key and 
-            os.path.basename(st.session_state.selected_file_key) in file_options):
-            file_index = file_options.index(
-                os.path.basename(st.session_state.selected_file_key)
-            )
-
+        # Get the currently selected file's basename if it exists
+        current_file_basename = (os.path.basename(st.session_state.selected_file_key) 
+                               if st.session_state.selected_file_key else '')
+        
+        # Set default index
+        default_index = 0
+        if current_file_basename in file_options:
+            default_index = file_options.index(current_file_basename)
+        
         selected_file = st.selectbox(
             "File",
             file_options,
-            index=file_index,
-            key=f"{bank_name}_file"
+            index=default_index,
+            key=f"{bank_name}_file_{selected_year}_{selected_period}"  # Make key unique
         )
 
     if selected_file:
-        full_path = f"{BASE_PATH}/{bank_name.lower()}/processed/{selected_year}/{selected_period}/{selected_file}"
+        # Get the full path from our mapping
+        full_path = file_mapping[selected_file]
         
-        # Update session state if file changed
+        # Only update if the file has actually changed
         if st.session_state.selected_file_key != full_path:
             st.session_state.current_bank = bank_name
             st.session_state.selected_file_key = full_path
             if st.session_state.current_file:
                 clear_file_cache(st.session_state.current_file)
             st.session_state.current_file = full_path
-            get_cached_document_content(full_path)
+            # Pre-cache the content
+            cache_file_content(full_path)
+            # Force a rerun to update the UI
+            st.rerun()
 
         return full_path
     
