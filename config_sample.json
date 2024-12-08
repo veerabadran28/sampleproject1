@@ -11,3 +11,116 @@
     "document-upload-cache-s3-path":"chatbot_uploads",
     "AmazonTextract-result-cache":"textract_output"
 }
+
+You are an expert financial analyst. I need a comparative analysis of Tata, Tesla, and Citi banks in a specific Python dictionary format. 
+
+Please provide your analysis ONLY in this exact Python dictionary format, with no additional text or explanations:
+
+data = {
+    "Bank": ["Tata", "Tesla", "Citi"],
+    "Common Patterns & Trends": [
+        # First string for Tata's trends
+        # Second string for Tesla's trends
+        # Third string for Citi's trends
+    ],
+    "Relative Performance": [
+        # First string for Tata's performance metrics
+        # Second string for Tesla's performance metrics
+        # Third string for Citi's performance metrics
+    ],
+    "Key Insights": [
+        # First string for Tata's key insights
+        # Second string for Tesla's key insights
+        # Third string for Citi's key insights
+    ],
+    "Forward Looking Analysis": [
+        # First string for Tata's future analysis
+        # Second string for Tesla's future analysis
+        # Third string for Citi's future analysis
+    ]
+}
+
+Requirements:
+1. Format must be exactly as shown above
+2. Each analysis point must be a single string with multiple insights separated by periods
+3. Include specific numbers and metrics where relevant
+4. Keep each string concise but informative
+5. Provide latest relevant insights for each category
+6. Do not include any other text, comments, or explanations
+7. Do not include the hash symbols or comments shown in the template above
+
+
+
+import streamlit as st
+import pandas as pd
+
+# Set page config
+st.set_page_config(layout="wide")
+
+# Custom CSS to match the exact styling with centered text and bold headers
+st.markdown("""
+    <style>
+    /* Header styling */
+    .stMarkdown table thead tr th {
+        background-color: #1c4e80 !important;
+        color: white !important;
+        font-weight: 700 !important;
+        padding: 15px !important;
+        border: 1px solid white !important;
+        text-align: center !important;
+    }
+    
+    /* First column styling */
+    .stMarkdown table tbody tr td:first-child {
+        background-color: #1c4e80 !important;
+        color: white !important;
+        font-weight: 700 !important;
+        text-align: center !important;
+    }
+    
+    /* Other cells styling */
+    .stMarkdown table tbody tr td {
+        background-color: #e6f3ff !important;
+        padding: 15px !important;
+        border: 1px solid white !important;
+        text-align: center !important;
+    }
+    
+    /* Remove default table styling */
+    .stMarkdown table {
+        border-collapse: collapse !important;
+        width: 100% !important;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# Create the data with meaningful insights
+data = {
+    "Bank": ["Tata", "Tesla", "Citi"],
+    "Common Patterns & Trends": [
+        "Strong digital adoption with 52% YoY growth in mobile banking. Focus on rural expansion. Steady growth in retail lending.",
+        "Integration of banking with EV ecosystem. High tech-savvy customer base. Innovation in payment solutions.",
+        "Global banking leadership. Strong corporate relationships. Focus on premium retail services."
+    ],
+    "Relative Performance": [
+        "ROE: 15.8%, NPAs reduced to 1.2%. Market share growth of 3.2% in retail segment. Cost-to-income ratio: 42%.",
+        "ROE: 18.2%, Deposit growth: 28%. Leading auto-finance portfolio. Digital transaction share: 78%.",
+        "ROE: 14.5%, Revenue growth: 12%. Investment banking revenue up 15%. Operating costs down 8%."
+    ],
+    "Key Insights": [
+        "Leader in rural banking penetration. Strong retail loan book quality. Successful digital transformation initiatives.",
+        "Unique EV-banking synergy advantages. High customer engagement in digital services. Low acquisition costs.",
+        "Robust international presence. Strong institutional banking segment. Effective risk management framework."
+    ],
+    "Forward Looking Analysis": [
+        "Investing $2B in digital infrastructure. Plans to open 500 new branches. Targeting 40% growth in UPI transactions.",
+        "Launching autonomous banking platform. $3B investment in AI/ML. Expanding green banking initiatives.",
+        "Expanding in emerging markets. $4B digital transformation plan. Focus on wealth management services."
+    ]
+}
+
+# Convert to DataFrame
+df = pd.DataFrame(data)
+
+# Display the table using markdown to maintain styling
+st.markdown(df.to_markdown(index=False), unsafe_allow_html=True)
