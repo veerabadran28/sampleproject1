@@ -1,0 +1,299 @@
+{
+    "app_config": {
+        "title": "Competitor Analysis",
+        "driver_year": "2024",
+        "driver_period": "Q3",
+        "banks_retail": [
+            "Barclays",
+            "Lloyds Retail",
+            "Santander",
+            "HSBC UK RBWM",
+            "NatWest"
+        ],
+        "banks_group": [
+            "Barclays",
+            "Lloyds Group",
+            "Santander",
+            "HSBC UK RBWM",
+            "NatWest"
+        ],
+        "barclays_logo_url": "https://upload.wikimedia.org/wikipedia/en/thumb/7/7e/Barclays_logo.svg/391px-Barclays_logo.svg.png",        
+        "cards": {
+            "Documents": {
+                "icon": "📄",
+                "description": "Access all documents & Interact with Document Assistant",
+                "view": "documents",
+                "sub_cards": {
+                    "Manage Documents": {
+                        "icon": "📁",
+                        "description": "Upload and manage documents",
+                        "view": "manage_documents"
+                    },
+                    "Explore Documents": {
+                        "icon": "🔍",
+                        "description": "Search and analyze documents",
+                        "view": "explore_documents"
+                    }
+                }
+            },
+            "Summary Analysis": {
+                "icon": "📊",
+                "description": "View analysis dashboard",
+                "view": "summary_analysis"
+            },
+            "Report": {
+                "icon": "📑",
+                "description": "Generate reports",
+                "view": "report"
+            },
+            "Admin": {
+                "icon": "⚙️",
+                "description": "Manage settings",
+                "view": "admin"
+            }
+        }
+    },
+    "s3_config": {
+        "bucket": "myawstests3buckets1",
+        "main_folder": "financebenchmarking1",
+        "temp_bucket": "myawstests3buckets1-temp",
+        "upload_formats": {
+            "document": [".pdf", ".txt", ".doc", ".docx"],
+            "spreadsheet": [".xlsx", ".csv", ".xls"],
+            "media": [".mp3", ".wav", ".mp4", ".avi"]
+        }
+    },
+    "aws_config": {
+        "region": "us-east-1",
+        "opensearch": {
+            "endpoint": "https://search-finance-documents-zcwgp66n3em7ua32p65ulkmlfy.us-east-1.es.amazonaws.com",
+            "index": "finance_documents",
+            "region": "us-east-1",
+            "embedding_dimension": 1024,
+            "search_config": {
+                "hybrid_search_weights": {
+                    "semantic": 0.7,
+                    "keyword": 0.3
+                },
+                "max_results": 5
+            }
+        },
+        "rds": {
+            "host": "your-rds-endpoint",
+            "port": 5432,
+            "database": "finance_db",
+            "user": "admin",
+            "ssl_mode": "verify-full"
+        },
+        "dynamodb": {
+            "chat_history_table": "document_chat_history",
+            "user_settings_table": "user_settings"
+        },
+        "lambda": {
+            "document_processor": "document-processor-function",
+            "embedding_generator": "embedding-generator-function"
+        }
+    },
+    "document_processing": {
+        "chunk_size": 1000,
+        "chunk_overlap": 200,
+        "max_file_size_mb": 100,
+        "default_encoding": "utf-8",
+        "fallback_encodings": ["latin1", "iso-8859-1", "cp1252"],
+        "supported_formats": {
+            "document": [".pdf", ".txt", ".doc", ".docx", ".md"],
+            "spreadsheet": [".xlsx", ".csv", ".xls"],
+            "audio": [".mp3", ".wav", ".m4a"],
+            "video": [".mp4", ".avi", ".mov"]
+        },
+        "ocr_config": {
+            "enable_handwriting": true,
+            "enable_tables": true,
+            "language_codes": ["en"]
+        },
+        "transcribe_config": {
+            "language_code": "en-US",
+            "enable_speaker_diarization": true,
+            "max_speakers": 10
+        },
+        "embedding_config": {
+            "model": "amazon.titan-embed-text-v2:0",
+            "batch_size": 10,
+            "max_retries": 3,
+            "retry_delay": 1
+        },
+        "pii_handling": {
+            "enable_detection": true,
+            "enable_redaction": true,
+            "entity_types": [
+                "BANK_ACCOUNT_NUMBER",
+                "CREDIT_DEBIT_NUMBER",
+                "EMAIL",
+                "PHONE",
+                "SSN"
+            ]
+        }
+    },
+    "chat_interface": {
+        "max_history": 50,
+        "max_tokens_per_message": 2000,
+        "system_prompt_template": "You are a helpful financial document assistant. {context}",
+        "citation_format": "[{document_name} (Page {page_number})]",
+        "enable_follow_up_questions": true
+    },
+    "ui_config": {
+        "theme_colors": {
+            "primary": "#0051A2",
+            "secondary": "#006A4D",
+            "accent": "#FFD700"
+        },
+        "layouts": {
+            "main": "wide",
+            "document": "centered",
+            "chat": "wide"
+        },
+        "display": {
+            "show_token_usage": true,
+            "show_processing_time": true,
+            "enable_dark_mode": true
+        }
+    },
+    "logging_config": {
+        "level": "INFO",
+        "enable_cloudwatch": true,
+        "retention_days": 30,
+        "log_groups": {
+            "application": "/competitor-analysis/app",
+            "document-processing": "/competitor-analysis/document-processor",
+            "chat": "/competitor-analysis/chat"
+        }
+    },
+    "security_config": {
+        "enable_encryption": true,
+        "enable_audit_logging": true,
+        "allowed_domains": ["barclays.com"],
+        "session_timeout": 3600,
+        "max_upload_size_mb": 100,
+        "guardrails": {
+            "content_filtering": {
+                "enable_pii_detection": true,
+                "enable_content_filtering": true,
+                "max_prompt_length": 4096,
+                "blocked_keywords": [
+                    "hack",
+                    "exploit",
+                    "vulnerability",
+                    "attack",
+                    "confidential",
+                    "secret",
+                    "private key",
+                    "password"
+                ],
+                "sensitive_commands": [
+                    "DELETE",
+                    "DROP",
+                    "TRUNCATE",
+                    "ALTER",
+                    "rm -rf",
+                    "format",
+                    "mkfs"
+                ]
+            },
+            "pii_detection": {
+                "enabled": true,
+                "entity_types": [
+                    "BANK_ACCOUNT_NUMBER",
+                    "CREDIT_DEBIT_NUMBER",
+                    "CREDIT_CARD_NUMBER",
+                    "EMAIL",
+                    "PHONE",
+                    "SSN",
+                    "NAME",
+                    "ADDRESS",
+                    "PIN",
+                    "AWS_ACCESS_KEY",
+                    "PASSWORD",
+                    "IP_ADDRESS",
+                    "MAC_ADDRESS",
+                    "LICENSE_PLATE",
+                    "PASSPORT_NUMBER",
+                    "DRIVER_ID"
+                ],
+                "redaction_enabled": true,
+                "comprehend_settings": {
+                    "language_code": "en",
+                    "min_confidence_score": 0.75,
+                    "batch_size": 25,
+                    "max_text_length": 50000
+                }
+            },
+            "logging": {
+                "enable_security_logging": true
+            }
+        }
+    },
+    "tabs_config": {
+        "main_tabs": ["Final Summary", "Working Summary", "Data Insights"],
+        "main_view_tabs": ["Summary", "Data Preview"],
+        "working_summary_tabs": [
+            "Barclays UK",
+            "Barclays UK Group",
+            "Santander",
+            "Santander UK Group",            
+            "Lloyds Retail",
+            "Lloyds Group",
+            "HSBC UK RBWM",
+            "HSBC UK RBWM USD",
+            "HSBC UK RBWM GBP",
+            "NatWest"
+        ],
+        "final_summary_tabs": [
+            "Inc BB YoY",
+            "Ex BB YoY",
+            "Inc BB QoQ",
+            "Ex BB QoQ",
+            "Balance Sheet",
+            "HSBC bals working"
+        ]
+    },
+    "model_config": {
+        "model_id": "anthropic.claude-3-5-sonnet-20240620-v1:0",
+        "nova_model_id": "amazon.nova-pro-v1:0",
+        "nova_model_params": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "max_tokens": 8191
+        },
+        "version": "bedrock-2023-05-31",
+        "region": "us-east-1",
+        "max_tokens": 8191,
+        "temperature": 0.7,
+        "top_p": 0.9,
+        "model_params": {
+            "system_prompt_token_limit": 1024,
+            "context_token_limit": 12000,
+            "response_token_limit": 4096,
+            "chunk_token_limit": 1500
+        }
+    },
+    "knowledge_base_config": {
+        "knowledge_base_id": "MEGMDJFEJS",
+        "data_source_id": "GL9FOM7WLD",
+        "max_results": 10,
+        "max_history": 5,
+        "vector_search_config": {
+            "model": "amazon.titan-embed-text-v2",
+            "dimension": 1536,
+            "similarity_threshold": 0.7,
+            "vectorField": "bedrock-knowledge-base-default-vector"
+        },
+        "s3_config": {
+            "bucket": "myawstests3buckets1",
+            "main_folder": "financebenchmarking1/"
+        },
+        "retrieval_config": {
+            "vectorSearchWeight": 0.7,
+            "keywordSearchWeight": 0.3
+        }
+    }
+}
