@@ -116,7 +116,6 @@ class KnowledgeBaseService:
                 model_id = self.config.get('model_config', {}).get('nova_model_id', 'amazon.nova-pro-v1:0')
                 model_arn = f"arn:aws:bedrock:us-east-1::foundation-model/{model_id}"
             else:
-                # Modified Claude model configuration
                 model_id = self.config.get('model_config', {}).get('model_id', 'anthropic.claude-3-5-sonnet-20240620-v1:0')
                 model_arn = model_id  # Claude models expect just the model ID
 
@@ -134,7 +133,7 @@ class KnowledgeBaseService:
                 
                 Based on the provided context, please answer the following question:
 
-                Please always structure your response as a JSON object with the following format:
+                Please always structure your response as a JSON object with the following format with no other text:
                 {{
                     "answer": "<your detailed answer here>",
                     "chart_data": [
@@ -154,6 +153,8 @@ class KnowledgeBaseService:
                         "title": "Chart Title"
                     }}
                 }}
+
+                Do not include any text before or after the JSON object. Just return the JSON object itself.
                 
                 Available Chart Types:
                 1. Comparison Charts:
@@ -216,7 +217,7 @@ class KnowledgeBaseService:
                     ["Product B", "South", 900]
                 ]
 
-                If the data does not support creating a chart, you can omit the chart_data, chart_type, and chart_attributes fields.
+                If the data does not support creating a chart, you can omit the chart_data, chart_type, and chart_attributes fields.                
                 """
             else:
                 # Original template for Nova
@@ -309,27 +310,33 @@ class KnowledgeBaseService:
 
             if conversation_context:
                 structured_query_template += f"\nPrevious Conversation Context:\n{conversation_context}"
-            
-            retrieve_config = {
-                "type": "KNOWLEDGE_BASE",
-                "knowledgeBaseConfiguration": {
-                    "knowledgeBaseId": self.knowledge_base_id,
-                    "modelArn": model_arn,
-                    "retrievalConfiguration": {
-                        "vectorSearchConfiguration": vector_search_config
+
+            if use_nova:
+                retrieve_config = {
+                    "type": "KNOWLEDGE_BASE",
+                    "knowledgeBaseConfiguration": {
+                        "knowledgeBaseId": self.knowledge_base_id,
+                        "modelArn": model_arn,
+                        "retrievalConfiguration": {
+                            "vectorSearchConfiguration": vector_search_config
+                        }
                     }
                 }
-            }
-
+            
             self._wait_for_rate_limit()
             print("structured_query_template:")
             print(structured_query_template)
-            print(f"Using model ARN/ID: {model_arn}")
 
             try:
-                if not use_nova:
-                    # Prepare the request configuration
-                    request_config = {
+                if use_nova:
+                    response = self._make_request_with_retry(
+                        self.bedrock_kb.retrieve_and_generate,
+                        input={"text": structured_query_template},
+                        retrieveAndGenerateConfiguration=retrieve_config
+                    )
+                else:
+                    # Prepare the common request configuration
+                    base_config = {
                         "input": {
                             "text": query
                         },
@@ -337,25 +344,27 @@ class KnowledgeBaseService:
                             "type": "KNOWLEDGE_BASE",
                             "knowledgeBaseConfiguration": {
                                 "knowledgeBaseId": self.knowledge_base_id,
-                                "modelArn": "anthropic.claude-3-5-sonnet-20240620-v1:0",
+                                "modelArn": model_arn,
                                 "retrievalConfiguration": {
                                     "vectorSearchConfiguration": {
                                         "numberOfResults": 10
                                     }
-                                },
-                                "generationConfiguration": {
-                                    "promptTemplate": {
-                                        "textPromptTemplate": structured_query_template
-                                    },
-                                    "inferenceConfig": {
-                                        "textInferenceConfig": {
-                                            "temperature": 0.7,
-                                            "topP": 0.9,
-                                            "maxTokens": 4000,
-                                            "stopSequences": []
-                                        }
-                                    }
                                 }
+                            }
+                        }
+                    }
+
+                    # Add Claude-specific configuration
+                    base_config["retrieveAndGenerateConfiguration"]["knowledgeBaseConfiguration"]["generationConfiguration"] = {
+                        "promptTemplate": {
+                            "textPromptTemplate": structured_query_template
+                        },
+                        "inferenceConfig": {
+                            "textInferenceConfig": {
+                                "temperature": 0.7,
+                                "topP": 0.9,
+                                "maxTokens": 4000,
+                                "stopSequences": []
                             }
                         }
                     }
@@ -370,20 +379,15 @@ class KnowledgeBaseService:
                                 }
                             }
                         }
-                        request_config["retrieveAndGenerateConfiguration"]["knowledgeBaseConfiguration"]["retrievalConfiguration"]["vectorSearchConfiguration"].update(filter_config)
-                        # Make the API call
-                        response = self.bedrock_kb.retrieve_and_generate(
-                            **request_config
-                        )                        
-                        print(f"Claude Model Response: {response}")
-                else:
+                        base_config["retrieveAndGenerateConfiguration"]["knowledgeBaseConfiguration"]["retrievalConfiguration"]["vectorSearchConfiguration"].update(filter_config)
+
+                    # Make the API call
                     response = self._make_request_with_retry(
                         self.bedrock_kb.retrieve_and_generate,
-                        input={"text": structured_query_template},
-                        retrieveAndGenerateConfiguration=retrieve_config
+                        **base_config
                     )
-                    print(f"Nova Model Response: {response}")
-                
+                print(f"{'Claude' if not use_nova else 'Nova'} Model Response: {response}")
+
                 if not response:
                     return json.dumps({
                         "answer": "I apologize, but I couldn't generate a response. Please try again.",
@@ -391,39 +395,79 @@ class KnowledgeBaseService:
                     })
 
                 completion = response.get('output', {}).get('text', '')
-                citations_data = response.get('citations', [])                
-                    
-                print(completion)
-
-                # Handle empty or error responses
-                if not completion or completion.strip().lower().startswith("sorry"):
-                    return json.dumps({
-                        "answer": "I apologize, but I couldn't find relevant information to answer your question. Please try rephrasing your question.",
-                        "chart_data": []
-                    })
-
-                try:
-                    structured_response = json.loads(completion)
-                    citations = self._format_citations(citations_data)
-                    if citations:
-                        structured_response['answer'] = structured_response.get('answer', '') + "\n\n" + citations
-                    else:
-                        structured_response['answer'] = structured_response.get('answer', '')
-                    
-                    if 'chart_data' in structured_response:
-                        structured_response['chart_data'] = self._clean_chart_data(structured_response['chart_data'])
+                citations_data = response.get('citations', [])
+                
+                if use_nova:
+                    try:
+                        structured_response = json.loads(completion)
+                        citations = self._format_citations(citations_data)
+                        print(f"citations:{citations}")
+                        if citations:
+                            structured_response['answer'] = structured_response.get('answer', '') + "\n\n" + citations
+                        else:
+                            structured_response['answer'] = structured_response.get('answer', '')
                         
-                        if not structured_response['chart_data']:
-                            structured_response.pop('chart_data', None)
-                            structured_response.pop('chart_type', None)
-                            structured_response.pop('chart_attributes', None)
+                        if 'chart_data' in structured_response:
+                            structured_response['chart_data'] = self._clean_chart_data(structured_response['chart_data'])
+                            
+                            if not structured_response['chart_data']:
+                                structured_response.pop('chart_data', None)
+                                structured_response.pop('chart_type', None)
+                                structured_response.pop('chart_attributes', None)
 
-                    return json.dumps(structured_response)
+                        return json.dumps(structured_response)
 
-                except json.JSONDecodeError:
-                    citations = self._format_citations(citations_data)
-                    basic_response = completion + "\n\n" + citations if citations else completion
-                    return json.dumps({"answer": basic_response})
+                    except json.JSONDecodeError:
+                        self.logger.error(f"Nova JSON parsing error: {str(e)}")
+                        citations = self._format_citations(citations_data)
+                        basic_response = completion + "\n\n" + citations if citations else completion
+                        return json.dumps({"answer": basic_response})
+                else:
+                    try:
+                        # Clean up the completion string for both models
+                        completion = completion.strip()
+                        
+                        # For Claude model, handle the text prefix
+                        if not completion.startswith('{'):
+                            # Remove any text before the JSON
+                            json_start = completion.find('{')
+                            json_end = completion.rfind('}') + 1
+                            if json_start >= 0 and json_end > json_start:
+                                completion = completion[json_start:json_end]
+                            else:
+                                # If no JSON found, create a basic JSON response
+                                return json.dumps({
+                                    "answer": completion,
+                                    "chart_data": []
+                                })
+                        
+                        structured_response = json.loads(completion)
+                        
+                        # Format citations
+                        citations = self._format_citations(citations_data)
+                        print(f"citations:{citations}")
+                        
+                        # Add citations to the answer if available
+                        if citations:
+                            structured_response['answer'] = structured_response.get('answer', '') + "\n\n" + citations
+                        
+                        # Handle chart data
+                        if structured_response.get('chart_data'):
+                            structured_response['chart_data'] = self._clean_chart_data(structured_response['chart_data'])
+                            
+                            if not structured_response['chart_data']:
+                                structured_response.pop('chart_data', None)
+                                structured_response.pop('chart_type', None)
+                                structured_response.pop('chart_attributes', None)
+
+                        return json.dumps(structured_response)
+
+                    except Exception as e:
+                        self.logger.error(f"Claude response processing error: {str(e)}")
+                        return json.dumps({
+                            "answer": completion,
+                            "chart_data": []
+                        })
 
             except Exception as e:
                 self.logger.error(f"Error making request: {str(e)}")
