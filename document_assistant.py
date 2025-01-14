@@ -45,6 +45,8 @@ class DocumentAssistantUI:
             st.session_state.folder_structure = self._get_folder_structure()
         if 'file_cache' not in st.session_state:
             st.session_state.file_cache = {}  # Initialize as an empty dictionary
+        if 'selected_model' not in st.session_state:
+            st.session_state.selected_model = 'Claude-3.5-Sonnet'
 
     def render(self):
         """Main render method for Document Assistant."""
@@ -307,55 +309,62 @@ class DocumentAssistantUI:
                         )
 
                         if st.button("Upload and Process Document", type="primary", use_container_width=True):
+                            # Initialize upload progress
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
                             try:
-                                # Create a placeholder for progress messages
-                                progress_placeholder = st.empty()
+                                # Step 1: Validate file
+                                status_text.text("Validating document...")
+                                progress_bar.progress(0.2)
+                                
+                                validation_results = self.doc_processor.validate_document(uploaded_file, uploaded_file.name)
+                                
+                                if not validation_results['is_valid']:
+                                    progress_bar.empty()
+                                    status_text.empty()
+                                    st.error("\n".join(validation_results['errors']))
+                                    return
 
-                                # Step 1: Upload to S3
-                                progress_placeholder.info("Uploading to S3...")
+                                # Step 2: Upload to S3
+                                status_text.text("Uploading to S3...")
                                 s3_file = io.BytesIO(uploaded_file.getvalue())
                                 s3_file.name = uploaded_file.name
-                                s3_path = self.s3_service.upload_file(s3_file, selected_bank, selected_year, selected_period)
-
-                                # Step 2: Process document
-                                progress_placeholder.info("Processing document...")
-                                process_file = io.BytesIO(uploaded_file.getvalue())
-                                process_file.name = uploaded_file.name
-                                chunks = self.doc_processor.process_document(
-                                    file=process_file,
-                                    filename=uploaded_file.name
+                                
+                                # Upload file
+                                s3_path = self.s3_service.upload_file(
+                                    s3_file, 
+                                    selected_bank, 
+                                    selected_year, 
+                                    selected_period
                                 )
+                                
+                                # Update progress
+                                progress_bar.progress(1.0)
+                                status_text.empty()
 
-                                # Step 3: Index in OpenSearch
-                                progress_placeholder.info("Indexing document...")
-                                self.opensearch_service.index_document(
-                                    chunks,
-                                    s3_path,
-                                    metadata={
-                                        "bank": selected_bank,
-                                        "year": selected_year,
-                                        "period": selected_period,
-                                        "filename": uploaded_file.name,
-                                        "file_type": os.path.splitext(uploaded_file.name)[1].lower(),
-                                        "upload_time": datetime.utcnow().isoformat()
-                                    }
-                                )
-
-                                # Show success message and clear the progress placeholder
-                                progress_placeholder.empty()
-                                st.success("Document processed successfully!")
-
+                                # Show success message
+                                st.success(f"✅ Document uploaded successfully!")
+                                
                                 # Set upload success flag
-                                if 'upload_success' not in st.session_state:
-                                    st.session_state.upload_success = True
-
-                                # Add small delay before rerun to ensure message is shown
-                                time.sleep(2)
+                                st.session_state.upload_success = True
+                                
+                                # Refresh folder structure
+                                st.session_state.folder_structure = self._get_folder_structure()
+                                
+                                # Add small delay before rerun
+                                time.sleep(1)
                                 st.rerun()
 
                             except Exception as e:
-                                st.error(f"Error processing document: {str(e)}")
+                                progress_bar.empty()
+                                status_text.empty()
+                                st.error(f"Error uploading document: {str(e)}")
                                 st.error("Please try again or contact support if the issue persists.")
+                            finally:
+                                # Clean up file objects
+                                if 's3_file' in locals():
+                                    s3_file.close()
 
     def _display_file_content(self, file_key: str):
         """Display file content based on type."""
@@ -449,6 +458,37 @@ class DocumentAssistantUI:
 
         # Document Selection Filters in Sidebar
         with st.sidebar:
+            st.markdown("### Model Selection")
+            model_options = {
+                'Claude-3.5-Sonnet': self.config['model_config']['model_id'],
+                'Amazon-Nova-Pro-v1': self.config['model_config']['nova_model_id']
+            }
+            selected_model = st.radio(
+                "Select Model",
+                options=['Claude-3.5-Sonnet', 'Amazon-Nova-Pro-v1'],
+                format_func=lambda x: x.capitalize(),
+                key="model_select",
+                index=0 if st.session_state.selected_model == 'Claude-3.5-Sonnet' else 1,
+                horizontal=True
+            )
+            if selected_model != st.session_state.selected_model:
+                st.session_state.selected_model = selected_model
+                # Clear chat messages when model changes
+                st.session_state.doc_assistant_messages = []
+                # Clear response time
+                if 'last_response_time' in st.session_state:
+                    del st.session_state.last_response_time
+                # Reset explore filters
+                st.session_state.explore_filters = {
+                    'bank': None,
+                    'year': None,
+                    'period': None,
+                    'document': None
+                }
+                st.rerun()
+
+            st.markdown("---")
+            
             st.markdown("### Document Filters")
 
             # Bank Selection
@@ -983,6 +1023,12 @@ class DocumentAssistantUI:
         if 'checkbox_states' not in st.session_state:
             st.session_state.checkbox_states = {}
 
+        # Create response time placeholder in sidebar
+        with st.sidebar:
+            if 'last_response_time' in st.session_state:
+                st.markdown("### Response Time")
+                st.info(f"{st.session_state.last_response_time:.2f} seconds")
+        
         # Check if document changed
         if st.session_state.selected_document != document_path:
             st.session_state.selected_document = document_path
@@ -1141,7 +1187,12 @@ class DocumentAssistantUI:
 
             # Generate and display assistant response
             with st.spinner("Analyzing document..."):
+                start_time = time.time()  # Start timing
                 response = self._get_document_response(prompt, document_path)
+                end_time = time.time()  # End timing
+                
+                # Store response time
+                st.session_state.last_response_time = end_time - start_time
 
                 st.session_state.doc_assistant_messages.append({
                     "role": "assistant",
@@ -1239,6 +1290,8 @@ class DocumentAssistantUI:
 
                     except json.JSONDecodeError:
                         st.markdown(response)
+                # Rerun after successfully displaying everything
+                st.rerun()
 
     def _process_document(self, file, bank: str, year: str, period: str):
         """Process uploaded document with validation and error handling."""
@@ -1346,20 +1399,21 @@ class DocumentAssistantUI:
             safe_prompt = redacted_prompt if redacted_prompt else prompt
 
             # Get response from Knowledge Base service
-            response = self.kb_service.search_documents(
+            safe_response = self.kb_service.search_documents(
                 query=safe_prompt,
                 document_path=document_path,
-                chat_history=st.session_state.doc_assistant_messages
-            )
+                chat_history=st.session_state.doc_assistant_messages,
+                use_nova=st.session_state.selected_model == 'Amazon-Nova-Pro-v1'
+            )            
 
-            if not response:
+            if not safe_response:
                 return json.dumps({
                     "answer": "I couldn't find relevant information in the document to answer your question.",
                     "chart_data": []
                 })
 
             # Validate response using guardrails
-            is_valid, error_message, redacted_response = self.guardrails_service.validate_response(response)
+            is_valid, error_message, redacted_response = self.guardrails_service.validate_response(safe_response)
             
             if not is_valid:
                 return json.dumps({
@@ -1368,22 +1422,24 @@ class DocumentAssistantUI:
                 })
 
             # Use redacted response if PII was detected and redacted
-            safe_response = redacted_response if redacted_response else response
+            final_response = redacted_response if redacted_response else safe_response
 
-            # Log successful interaction
+            # Log successful interaction with proper variable reference
             self.guardrails_service.log_security_event(
                 "successful_interaction",
                 {
                     "document_path": document_path,
-                    "prompt_length": len(prompt),
-                    "response_length": len(response),
+                    "prompt_length": len(safe_prompt),
+                    "response_length": len(final_response),
                     "pii_redacted": bool(redacted_prompt or redacted_response)
                 }
             )
 
-            return safe_response
+            return final_response
 
         except Exception as e:
+            end_time = time.time()
+            st.session_state.last_response_time = end_time - start_time
             error_msg = f"Error processing your question: {str(e)}"
             self.guardrails_service.log_security_event(
                 "error",
