@@ -1,0 +1,120 @@
+{
+    "document_types": {
+        "ppnr": {
+            "name": "PPNR Methodology and Process Overview",
+            "config_file": "ppnr_doc_gen_config.json",
+            "enabled": true
+        },
+        "finance_benchmarking": {
+            "name": "Finance Benchmarking",
+            "enabled": true
+        }
+    },
+    "input_settings": {
+        "data_mapping": {
+            "assets_identifier": "U10000000",
+            "liabilities_identifier": "U20000000",
+            "business_column": "business",
+            "period_column": "period",
+            "level_2_column": "level_2",
+            "balance_column": "balance"
+        },
+        "calculation_settings": {
+            "conversion_to_billions": true,
+            "base_scenario": "BHC Base",
+            "scenarios_order": [
+                "BHC Base",
+                "BHC Stress",
+                "Sup Base",
+                "Sup Sev Adv"
+            ]
+        }
+    },
+    "output_settings": {
+        "s3_base_path": "s3://myawstests3buckets1/financebenchmarking1/reports/model_outputs/",
+        "document_styling": {
+            "table_header": {
+                "background_color": "blue",
+                "text_color": "white",
+                "font_name": "Arial",
+                "font_size": 11
+            },
+            "table_cell": {
+                "font_name": "Arial",
+                "font_size": 11
+            }
+        },
+        "number_formats": {
+            "currency": "{:.1f}",
+            "percentage": "{:.1f}%",
+            "negative_currency": "({:.1f})",
+            "negative_percentage": "({:.1f})%"
+        }
+    },
+    "chart_settings": {
+        "colors": {
+            "BHC Base": "blue",
+            "BHC Stress": "red",
+            "Sup Base": "green",
+            "Sup Sev Adv": "purple"
+        },
+        "line_width": 2,
+        "marker_size": 8
+    },
+    "document_settings": {
+        "styles": {
+            "title": {
+                "font": "Arial",
+                "size": 16,
+                "bold": true,
+                "alignment": "center"
+            },
+            "heading1": {
+                "font": "Arial",
+                "size": 14,
+                "bold": true
+            },
+            "heading2": {
+                "font": "Arial",
+                "size": 12,
+                "bold": true
+            },
+            "normal": {
+                "font": "Arial",
+                "size": 11
+            },
+            "table_header": {
+                "background": "blue",
+                "text_color": "white",
+                "font": "Arial",
+                "size": 11,
+                "bold": true
+            }
+        },
+        "margins": {
+            "top": 1.0,
+            "bottom": 1.0,
+            "left": 1.0,
+            "right": 1.0
+        }
+    },
+    "data_processing": {
+        "assets_identifier": "U10000000",
+        "liabilities_identifier": "U20000000",
+        "aggregation": {
+            "conversion_to_billions": true,
+            "nine_quarter_average": {
+                "enabled": true,
+                "quarters": [
+                    "Q12024", "Q22024", "Q32024", "Q42024",
+                    "Q12025", "Q22025", "Q32025", "Q42025", "Q12026"
+                ]
+            },
+            "deviation_calculation": {
+                "enabled": true,
+                "base_scenario": "BHC Base",
+                "format": "{:.1f}%"
+            }
+        }
+    }
+}

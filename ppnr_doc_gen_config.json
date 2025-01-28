@@ -1,0 +1,125 @@
+{
+    "document_info": {
+        "title": "PPNR Methodology and Process Overview",
+        "year": "2024",
+        "version": "1.0"
+    },
+    "input_settings": {
+        "base_period_file": "s3://myawstests3buckets1/financebenchmarking1/reports/input/bs_elim_cons_net.csv",
+        "scenario_files": {
+            "BHC Base": "s3://myawstests3buckets1/financebenchmarking1/reports/input/bhc_base.csv",
+            "BHC Stress": "s3://myawstests3buckets1/financebenchmarking1/reports/input/internal_adverse.csv",
+            "Sup Base": "s3://myawstests3buckets1/financebenchmarking1/reports/input/supervisory_baseline.csv",
+            "Sup Sev Adv": "s3://myawstests3buckets1/financebenchmarking1/reports/input/supervisory_severely_adverse.csv"
+        },
+        "data_mapping": {
+            "assets_identifier": "U10000000",
+            "liabilities_identifier": "U20000000",
+            "business_column": "business",
+            "period_column": "period",
+            "level_2_column": "level_2",
+            "balance_column": "balance"
+        },
+        "calculation_settings": {
+            "conversion_to_billions": true,
+            "nine_quarter_periods": [
+                "2024Q1", "2024Q2", "2024Q3", "2024Q4",
+                "2025Q1", "2025Q2", "2025Q3", "2025Q4", "2026Q1"
+            ],
+            "base_scenario": "BHC Base",
+            "scenarios_order": [
+                "BHC Base",
+                "BHC Stress",
+                "Sup Base",
+                "Sup Sev Adv"
+            ]
+        }
+    },
+    "output_settings": {
+        "s3_output_path": "s3://myawstests3buckets1/financebenchmarking1/reports/model_outputs/",
+        "file_patterns": {
+            "docx": "2024_ppnr_methodology_and_process_overview_{timestamp}.docx",
+            "pdf": "2024_ppnr_methodology_and_process_overview_{timestamp}.pdf",
+            "json": "2024_ppnr_methodology_and_process_overview_{timestamp}.json"
+        },
+        "document_styling": {
+            "table_header": {
+                "background_color": "blue",
+                "text_color": "white",
+                "font_name": "Arial",
+                "font_size": 11
+            }
+        }
+    },
+    "executive_summary": {
+        "title": "Executive Summary",
+        "sections": [
+            {
+                "id": "introduction",
+                "title": "Introduction",
+                "content": "This document provides an overview of the Pre-Provision Net Revenue (\"PPNR\") and Balance Sheet (\"BS\") modeling methodology and process used by Barclays' Intermediate Holding Company (\"IHC\") for the annual Capital plan submission (the \"Capital Plan\") for 2024."
+            },
+            {
+                "id": "business_overview",
+                "title": "Business Overview and Segmentation",
+                "content": "Barclays PLC is a diversified bank with five operating divisions comprising: Barclays UI, Barclays UK Corporate Bank, Barclays Private Bank and Wealth Management, Barclays Investment Bank and Barclays US Consumer Bank."
+            },
+            {
+                "id": "methodology",
+                "title": "Methodology",
+                "content": "The IHC has established model development framework that is designed to apply a consistent approach for developing models."
+            }
+        ]
+    },
+    "narrative_templates": {
+        "overall": {
+            "request": "Analyze the business line performance across all scenarios and provide a comprehensive overview.",
+            "context": "You are analyzing a financial institution's business line performance across different scenarios. Focus on key business activities, model assumptions, fundamental relationships, and off-balance sheet items.",
+            "format": "1. Business Overview and Activities\n2. Model Assumptions and Impacts\n3. Fundamental Relationships\n4. Off-Balance Sheet Analysis",
+            "example": "FI Financing acts as a credit and liquidity intermediary in the financial markets by entering into secured financing transactions, primarily repurchase agreements ('repos') and reverse repurchase agreements ('reverse repos') with securities (including liquid investment bonds, agency securities, emerging market products, etc.). The main products within the BHC are repos, reverse repos, securities loaned, securities borrowed and margin lending for US Treasury, Agencies, Corporates and other fixed income securities.\n\nThe FI Financing balance sheet results are sensitive to core key model assumptions which could have material impact on the BHC results: the Barclays' FI Financing market share of 0.97% is assumed to be constant at the historical performance average across the nine-quarter forecast and all macroeconomic stress scenarios. The sensitivity analysis resulted in upper and lower impacts to Balance Sheet of $2.7 billion and $(2.7) billion, respectively. This translates into a leverage ratio impact of 15 bps and (15) bps, for total impact of 30 bps. It also has impacts of 16 bps and (16) bps to the CETI ratio, respectively, for a total impact of 32 bps. Please refer to Section 6 Material assumptions for additional details.\n\nA fundamental relationship exists within FI Financing is the inverse correlation between the St. Louis Fed Financial Stress Index (STLFSI) and net assets. The STLFSI can serve as an indicator of short term credit risk in the market. As the STLFSI increases, the balance sheet decreases as investors reduce risk in their portfolios, as a result, reducing the need for financing.\n\nOff balance sheet items are largely due to hedging activity and projected by a linkage to the growth of securities borrowed and reverse repos. Capital Contingency Liquidity Facility (CCLF) forecasts are added as an off balance sheet item once the 2024 Capital Plan assumptions. CCLF is reset semi-annually and projections will be linked to the growth rate of reverse repos and securities borrowed."
+        },
+        "baseline": {
+            "request": "Analyze the baseline scenario (BHC Base) performance and provide detailed insights.",
+            "context": "Focus on the BHC baseline scenario performance, comparing with historical data and analyzing key drivers of changes.",
+            "format": "Baseline Scenarios:\n1. Performance Summary\n2. Scenario Analysis\n3. Key Drivers\n4. Comparative Analysis",
+            "example": "Baseline Scenarios:\nThe BHC baseline scenario exhibits a 3.5% decrease in assets, with an average of $25.4 billion and 3.2k decrease in liabilities, with an average of $(27.1) billion over the nine-quarter forecast period, compared to Q4 2023 spot balance sheet of $26.3 billion in assets and $(27.9) billion in liabilities.\n\nUnder the BHC baseline Scenario, assets decrease to $23.3 billion in the first quarter from the Q4 2023 jump off of $26.3 billion, driven mostly by the normalizing impact of the model which uses a four quarter historical average for the market share (0.97%) vs. the Q4 2023 spot market share (0.98%). This is supported by an increase of the STLFSI from (0.50) in P0Q to 0.02 in P0I. The balance sheet remains stable from Q2 2024 at approximately $25.4 billion, reflecting a normalized stable market environment and minimal movement in the STLFSI.\n\nThe BHC Baseline Scenario results trend very closely with the Supervisory Baseline Scenario, as the macroeconomic variable STLFSI in both scenarios remain stable with little movement over the nine-quarter forecast period. The consolidated assets in the Supervisory baseline scenario range from $23.3 billion (Q1 2024) with a nine-quarter average of $25.4 billion (Q1 2026) with a nine-quarter average of $25.4 billion.\n\nFor the BHC Baseline Scenario, the 2024 Capital Plan submission nine-quarter average is less than the 2023 Capital Plan submission by $(1) billion, mostly driven by lower market share (0.97% vs 1.16%) and the impact of the STLFSI.\n\nForecasted liabilities grow and decline in tandem with reverse repos and securities borrowed forecasts. These linkages are intuitive given that FI Financing operates a matched book by facilitating the exchange of cash and fixed income securities. It is common for the start side of the matched book transactions (sourcing collateral) to be done via reverse repo or securities borrowed and the liability side (sourcing funding) to be done via repo and securities loaned.\n\nFurthermore, there is relatively low volatility in the historical liabilities to assets ratio."
+        },
+        "stress": {
+            "request": "Analyze the stress scenarios performance and provide comparative analysis.",
+            "context": "Analyze performance under stress scenarios, focusing on impacts, differences between scenarios, and recovery patterns.",
+            "format": "Stress Scenarios:\n1. Business Impact\n2. Scenario Comparison\n3. Risk Analysis\n4. Recovery Patterns",
+            "example": "Stress Scenarios:\nFI Financing has two primary business lines: Credit (Corporates, Emerging Markets and Securitized Products) and Liquidity Markets Financing. The FI Financing business' major clients are Hedge Funds and in periods of stress Barclays would expect these types of clients to delever as they look to reduce the risk of their portfolios. This client deleveraging would be more apparent in less liquid products (Credit and Emerging Markets), while Barclays would expect to see an overall flight to quality with increased demand for liquid market collateral. Barclays would also expect the bid-offer rate to widen due to credit and liquid concerns.\n\nIn the BHC Stress Scenario, the assets range from $20.3 billion (Q3 2024) to $25.9 billion (Q1 2024), with a nine-quarter average of $(28.0) billion. The assets show a decrease in Q1 2024 due to the normalizing impact of the model which uses a four-quarter historical average for the market share (0.97%) compared to Q4 2023 spot (0.98%). The assets continue to decline to reach the trough at $20.3 billion in Q3 2024 as STLFSI continues to be adverse, in addition to the impact from the STLFSI increasing from (0.50) to 0.45. The assets begin to recover in the following six quarters as the quarter-over-quarter change of the STLFSI recovers, indicating that market conditions are normalizing.\n\nDifferences between the Supervisory Severely Adverse Scenario and BHC Baseline Scenario are driven by two overall forecasts. In the initial part of the forecasting period, the QoQ change increases in the BHC Stress scenario, causing the assets to decline from Q1 2024 to reach the trough at $20.3 billion in Q3 2024. The QoQ change of STLFSI increase under BHC Baseline from (0.50) at the jump off point to 0.02 in Q1 2024 and contracts in Q2 2024 by (0.00), and remains stable, causing the assets to remain stable as well at $25.4 billion. Hence, the delta between the two forecasts is high in Q3 2024. Post Q4 2024, the QoQ change of the STLFSI under the BHC Stress scenario starts to decline and the delta between the two forecasts reduces as well.\n\nDifferences between the Supervisory Severely Adverse Scenario and the BHC Stress Scenario can also be explained by the scenario paths of the STLFSI. In the initial part of the forecasting period, the delta between the two forecasts is $(7) billion in Q1 2024 as QoQ change of the index widens more in Supervisory Severely Adverse compared to BHC Stress (0.03 vs. 1.13), leading to lower assets in the Supervisory Severely Adverse scenario. Under the Supervisory Severely Adverse scenario, the QoQ change of STLFSI continues to widen until Q2 2024 with the assets reaching a trough at $20.4 billion. The STLFSI then begins to contract from Q4 2024 until the end of the forecasting period, leading to a recovery in assets.\n\nFor BHC stress scenario, the 2024 Capital Plan submission's nine-quarter average is higher than CCAR 2023 by $0.2B billion, due to the impact from the movement of STLFSI between the scenarios, partially offset by lower market share (0.97% vs 1.16%)."
+        }
+    },
+    "business_sections": {
+        "fixed_income_financing": {
+            "title": "FIXED INCOME FINANCING",
+            "topics": {
+                "balance_sheet": {
+                    "title": "Balance Sheet",
+                    "driver_info": {
+                        "title": "FI Financing BS Key Drivers",
+                        "table": {
+                            "dependent_var": "Industry Reverse Repo Balances",
+                            "independent_var": "St. Louis Fed Financial Stress index (QoQ)",
+                            "lag": 0,
+                            "direction": "-"
+                        }
+                    },
+                    "projections": {
+                        "assets": {
+                            "title": "FI Financing total assets projections",
+                            "type": "table",
+                            "chart_title": "FI Financing total Consolidated assets"
+                        },
+                        "liabilities": {
+                            "title": "FI Financing total liabilities projections",
+                            "type": "table",
+                            "chart_title": "FI Financing total Consolidated liabilities"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
