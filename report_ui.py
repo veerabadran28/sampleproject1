@@ -16,6 +16,7 @@ from datetime import datetime
 import base64
 from src.ui.document_generation import DocumentGenerator
 from typing import Optional, Dict, List, Tuple
+import re
 
 @st.cache_data(ttl=3600)
 def load_bank_data_cached(_s3_service, file_pattern: str) -> dict:
@@ -1410,61 +1411,72 @@ class ReportUI:
             existing_docs = generator.get_latest_documents()
             
             with header_container:
-                # Create three columns: status/info, analysis button, document button
-                col1, col2, col3 = st.columns([2, 6, 2])
-                
-                with col1:
-                    if existing_docs:
-                        # Show download options for existing documents
-                        st.markdown("#### Download Existing Documents")
-                        download_col1, download_col2 = st.columns(2)
-                        with download_col1:
-                            if 'docx' in existing_docs:
-                                st.markdown(f"[📄 Download DOCX]({existing_docs['docx']['url']})")
-                        with download_col2:
-                            if 'pdf' in existing_docs:
-                                st.markdown(f"[📑 Download PDF]({existing_docs['pdf']['url']})")
+                # Create three columns: analysis button, document button, download button
+                col1, col2, col3 = st.columns([6, 2, 2])
                 
                 # Analysis Generation Button
-                with col2:
+                with col1:
                     if has_cache:
                         if st.button("Re-Generate Analysis", key="regenerate_analysis"):
                             with st.spinner("Regenerating analysis..."):
-                                # Clear existing cache
-                                generator.cached_data = {}
-                                # Render sections with new analysis
-                                rendered = self._render_document_sections(generator)
+                                rendered = self._render_document_sections(generator, regenerate=True)
                                 if rendered:
-                                    st.success("Analysis regenerated successfully!")
-                                    # Save new cache
-                                    generator.save_cache()
-                                    st.rerun()
+                                    if generator.save_cache():
+                                        st.success("Analysis regenerated successfully!")
+                                        st.rerun()
+                                    else:
+                                        st.error("Failed to save regenerated analysis")
                     else:
                         if st.button("Generate Analysis", key="generate_analysis"):
                             with st.spinner("Generating analysis..."):
-                                rendered = self._render_document_sections(generator)
+                                rendered = self._render_document_sections(generator, regenerate=False)
                                 if rendered:
-                                    st.success("Analysis generated successfully!")
-                                    # Save cache
-                                    generator.save_cache()
-                                    st.rerun()
+                                    if generator.save_cache():
+                                        st.success("Analysis generated successfully!")
+                                        st.rerun()
+                                    else:
+                                        st.error("Failed to save analysis")
                 
                 # Document Generation Button
-                with col3:
+                with col2:
                     is_valid, missing_items = generator._validate_sections(generator.cached_data) if has_cache else (False, ["No analysis generated"])
-                    document_button_label = "Create Document" if not existing_docs else "Re-Create Document"
+                    document_button_label = "Create Document" if not existing_docs or 'docx' not in existing_docs else "Re-Create Document"
                     
                     if st.button(document_button_label, key="generate_doc", disabled=not is_valid):
-                        with st.spinner("Generating document..."):
-                            try:
-                                docx_file, pdf_file = generator.generate_document()
-                                if docx_file and pdf_file:
-                                    st.success("Documents generated successfully!")
-                                    st.experimental_rerun()
+                        try:
+                            with st.spinner("Generating Word document..."):
+                                docx_path = generator.generate_document()
+                                if docx_path:
+                                    st.success("Document generated successfully!")
+                                    # Force refresh of existing documents
+                                    existing_docs = generator.get_latest_documents()
+                                    st.rerun()
                                 else:
-                                    st.error("Failed to generate documents")
-                            except Exception as e:
-                                st.error(f"Error generating documents: {str(e)}")
+                                    st.error("Failed to generate document. Check the logs for details.")
+                        except Exception as doc_error:
+                            st.error(f"Error generating document: {str(doc_error)}")
+
+                # Download Section
+                with col3:
+                    if existing_docs and 'docx' in existing_docs:
+                        st.markdown("#### Download")
+                        
+                        # Get file content and name
+                        file_content, filename = self._get_download_link(
+                            self.s3_service, 
+                            existing_docs['docx']['url']
+                        )
+                        
+                        if file_content and filename:
+                            # Create download button
+                            st.download_button(
+                                label="📄 Download DOCX",
+                                data=file_content,
+                                file_name=filename,
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                            )
+                        else:
+                            st.error("Error preparing download. Please try again.")
 
             # Show status message
             if has_cache:
@@ -1472,9 +1484,9 @@ class ReportUI:
             else:
                 status_container.warning("No analysis found. Please generate new analysis.")
 
-            # Show content and validation status
+            # Display content and validation status
             if has_cache:
-                self._render_document_sections(generator)
+                self._render_document_sections(generator, regenerate=False)
                 
                 # Show validation status
                 if not is_valid:
@@ -1489,14 +1501,33 @@ class ReportUI:
             st.markdown("---")
 
         except Exception as e:
-            st.error(f"Error rendering methodology document: {str(e)}")    
+            st.error(f"Error rendering methodology document: {str(e)}")
     
-    def _render_document_sections(self, generator):
-        """Render all document sections as expanders."""
+    def _render_document_sections(self, generator, regenerate=False):
+        """Render document sections with consistent table styling."""
+        # Add custom CSS for heading alignment
+        st.markdown("""
+            <style>
+            h3 {
+                text-align: left !important;
+                padding-left: 0 !important;
+                margin-left: 0 !important;
+            }
+            </style>
+        """, unsafe_allow_html=True)
+        
         try:
             if not generator.config:
                 st.error("Document configuration not loaded")
-                return
+                return False
+                
+            # Initialize cache structure if not exists or regenerating
+            if regenerate or not generator.cached_data:
+                generator.cached_data = {
+                    'document_info': generator.config['document_info'],
+                    'executive_summary': generator.config['executive_summary'],
+                    'business_sections': {}
+                }
                 
             # First render executive summary
             if 'executive_summary' in generator.config:
@@ -1505,31 +1536,24 @@ class ReportUI:
                     st.subheader(section['title'])
                     st.write(section['content'])
 
-            # Initialize section data if no cache exists
-            if not generator.cached_data:
-                generator.cached_data = {
-                    'executive_summary': generator.config['executive_summary'],
-                    'business_sections': {}
-                }
-                
             # Handle business sections
+            has_cache = bool(generator.cached_data.get('business_sections')) and not regenerate
+            
             for section_key, section_config in generator.config['business_sections'].items():
-                print(f"section_key:{section_key}")
-                print(f"Generating for: {section_config['title']}")
+                # Initialize section if not exists
+                if section_key not in generator.cached_data['business_sections']:
+                    generator.cached_data['business_sections'][section_key] = {
+                        'title': section_config['title'],
+                        'topics': {}
+                    }
+                    
                 with st.expander(section_config['title']):
                     try:
-                        # Ensure section exists in cache
-                        if section_key not in generator.cached_data['business_sections']:
-                            generator.cached_data['business_sections'][section_key] = {
-                                'title': section_config['title'],
-                                'topics': {}
-                            }
-                            
-                        # Process each topic
+                        # Process topics
                         for topic_key, topic_config in section_config['topics'].items():
                             st.subheader(topic_config['title'])
                             
-                            # Initialize topic data
+                            # Initialize topic if needed
                             if topic_key not in generator.cached_data['business_sections'][section_key]['topics']:
                                 generator.cached_data['business_sections'][section_key]['topics'][topic_key] = {
                                     'title': topic_config['title'],
@@ -1538,18 +1562,16 @@ class ReportUI:
                                     'narratives': {}
                                 }
                             
-                            # Render driver information
+                            # Display driver information
                             if 'driver_info' in topic_config:
                                 st.markdown("#### Driver Information")
                                 driver_info = topic_config['driver_info']['table']
-                                #print(f"Driver info type:{type(driver_info)}")
-                                #print(driver_info)
                                 driver_table = generator.generate_driver_table(topic_config['driver_info']['table'])
                                 if driver_table:
-                                    st.plotly_chart(driver_table)
-                                    
-                            # Process and render data
-                            try:
+                                    st.plotly_chart(driver_table, use_container_width=True)
+                            
+                            # Process and display data
+                            if not has_cache or regenerate:
                                 data = generator._process_csv_data(
                                     business_line=section_config['title'],
                                     data_files={
@@ -1560,80 +1582,182 @@ class ReportUI:
                                 
                                 if data and len(data) == 2:
                                     assets_df, liabilities_df = data
+                                    topic_data = generator.cached_data['business_sections'][section_key]['topics'][topic_key]
                                     
-                                    # Store and render projections
+                                    # Store projections
                                     if 'projections' in topic_config:
-                                        topic_data = generator.cached_data['business_sections'][section_key]['topics'][topic_key]
-                                        
-                                        # Handle assets projection
-                                        if 'assets' in topic_config['projections']:
-                                            st.markdown(f"#### {topic_config['projections']['assets']['title']}")
-                                            st.dataframe(assets_df)
-                                            topic_data['projections']['assets'] = assets_df.to_dict('records')
-                                            
-                                            print("Before plotting chart")
-                                            print(assets_df)
-                                            # Create assets chart
-                                            assets_chart = generator.generate_line_chart(
-                                                assets_df,
-                                                topic_config['projections']['assets']['chart_title'],
-                                                "Assets ($bn)"
-                                            )
-                                            if assets_chart:
-                                                st.plotly_chart(assets_chart)
-                                        
-                                        # Handle liabilities projection
-                                        if 'liabilities' in topic_config['projections']:
-                                            st.markdown(f"#### {topic_config['projections']['liabilities']['title']}")
-                                            st.dataframe(liabilities_df)
-                                            topic_data['projections']['liabilities'] = liabilities_df.to_dict('records')
-                                            
-                                            # Create liabilities chart
-                                            liabilities_chart = generator.generate_line_chart(
-                                                liabilities_df,
-                                                topic_config['projections']['liabilities']['chart_title'],
-                                                "Liabilities ($bn)"
-                                            )
-                                            if liabilities_chart:
-                                                st.plotly_chart(liabilities_chart)
-                                                
-                                    # Generate and store narratives
+                                        topic_data['projections'] = {
+                                            'assets': assets_df.to_dict('records'),
+                                            'liabilities': liabilities_df.to_dict('records')
+                                        }
+                                    
+                                    # Generate narratives
                                     narratives = generator.generate_narratives(
                                         section_key,
                                         {'assets': assets_df, 'liabilities': liabilities_df},
                                         driver_info
                                     )
-                                    
                                     if narratives:
-                                        st.subheader("Analysis")
-                                        if 'overall' in narratives:
-                                            st.markdown(narratives['overall'])
-                                        
-                                        st.subheader("Baseline Scenario")
-                                        if 'baseline' in narratives:
-                                            st.markdown(narratives['baseline'])
-                                        
-                                        st.subheader("Stress Scenarios")
-                                        if 'stress' in narratives:
-                                            st.markdown(narratives['stress'])
-                                            
-                                        # Store narratives in cache
-                                        generator.cached_data['business_sections'][section_key]['topics'][topic_key]['narratives'] = narratives
-                                        
-                            except Exception as data_error:
-                                st.error(f"Error processing data for {section_key}/{topic_key}: {str(data_error)}")
+                                        topic_data['narratives'] = narratives
+                            
+                            # Display projections and charts
+                            cached_topic = generator.cached_data['business_sections'][section_key]['topics'][topic_key]
+                            
+                            if 'projections' in topic_config and 'projections' in cached_topic:
+                                if 'assets' in topic_config['projections']:
+                                    assets_df = pd.DataFrame(cached_topic['projections']['assets'])
+                                    # Display left-aligned heading
+                                    st.markdown(f"### {topic_config['projections']['assets']['title']}", unsafe_allow_html=True)
+                                    # Create and display assets table
+                                    assets_table = self._create_plotly_table(assets_df)
+                                    if assets_table:
+                                        st.plotly_chart(assets_table, use_container_width=True)
+                                    
+                                    # Display assets chart
+                                    assets_chart = generator.generate_line_chart(
+                                        assets_df,
+                                        topic_config['projections']['assets']['chart_title'],
+                                        "Assets ($bn)"
+                                    )
+                                    if assets_chart:
+                                        st.plotly_chart(assets_chart, use_container_width=True)
                                 
+                                if 'liabilities' in topic_config['projections']:
+                                    liabilities_df = pd.DataFrame(cached_topic['projections']['liabilities'])
+                                    # Display left-aligned heading
+                                    st.markdown(f"### {topic_config['projections']['liabilities']['title']}", unsafe_allow_html=True)
+                                    # Create and display liabilities table
+                                    liabilities_table = self._create_plotly_table(liabilities_df)
+                                    if liabilities_table:
+                                        st.plotly_chart(liabilities_table, use_container_width=True)
+                                    
+                                    # Display liabilities chart
+                                    liabilities_chart = generator.generate_line_chart(
+                                        liabilities_df,
+                                        topic_config['projections']['liabilities']['chart_title'],
+                                        "Liabilities ($bn)"
+                                    )
+                                    if liabilities_chart:
+                                        st.plotly_chart(liabilities_chart, use_container_width=True)
+                            
+                            # Display narratives
+                            if 'narratives' in cached_topic:
+                                st.subheader("Analysis")
+                                if 'overall' in cached_topic['narratives']:
+                                    #st.markdown(cached_topic['narratives']['overall'])
+                                    st.info(cached_topic['narratives']['overall'])
+                                
+                                st.subheader("Baseline Scenario")
+                                if 'baseline' in cached_topic['narratives']:
+                                    #st.markdown(cached_topic['narratives']['baseline'])
+                                    st.info(cached_topic['narratives']['baseline'])
+                                
+                                st.subheader("Stress Scenarios")
+                                if 'stress' in cached_topic['narratives']:
+                                    #st.markdown(cached_topic['narratives']['stress'])
+                                    st.info(cached_topic['narratives']['baseline'])
+                                    
+                                print("Narratives rendered")
+                                    
                     except Exception as section_error:
                         st.error(f"Error rendering section {section_key}: {str(section_error)}")
-
-            # Return True if all sections were rendered successfully
+                        raise  # Re-raise to see full error details
+                        
             return True
-
+                
         except Exception as e:
             st.error(f"Error rendering document sections: {str(e)}")
-            st.error(f"Config keys available: {list(generator.config.keys())}")
+            import traceback
+            st.error(f"Full error: {traceback.format_exc()}")
             return False    
     
+    def _create_plotly_table(self, df: pd.DataFrame, title: str = None) -> go.Figure:
+        """Create a Plotly table from DataFrame with consistent styling.
+        
+        Args:
+            df: Pandas DataFrame to display
+            title: Optional title for the table
+            
+        Returns:
+            go.Figure: Plotly figure containing the styled table
+        """
+        try:
+            # Calculate appropriate heights
+            header_height = 35  # Header height
+            cell_height = 30   # Cell height per row
+            num_rows = len(df)
+            total_height = header_height + (cell_height * num_rows)
+            
+            # Create figure
+            fig = go.Figure(data=[go.Table(
+                header=dict(
+                    values=list(df.columns),
+                    fill_color='#0051A2',
+                    font=dict(color='white', size=12),
+                    align='center',
+                    height=header_height,
+                    line_color='white',
+                    line_width=1
+                ),
+                cells=dict(
+                    values=[df[col] for col in df.columns],
+                    fill_color='white',
+                    align='center',
+                    height=cell_height,
+                    line_color='lightgrey',
+                    line_width=1,
+                    format=[
+                        '.1f' if pd.api.types.is_numeric_dtype(df[col]) and 'Dev.' not in col
+                        else None for col in df.columns
+                    ]
+                )
+            )])
+
+            # Update layout with wider width
+            fig.update_layout(
+                margin=dict(l=0, r=0, t=30 if title else 0, b=0),
+                height=total_height + 50,  # Add padding for better visibility
+                width=1200,  # Set wider fixed width
+                title=dict(
+                    text=title if title else "",
+                    x=0.5,
+                    y=1,
+                    xanchor='center',
+                    yanchor='top'
+                )
+            )
+            
+            return fig
+
+        except Exception as e:
+            st.error(f"Error creating Plotly table: {str(e)}")
+            return None
+    
+    def _get_download_link(self, s3_service, file_url: str) -> tuple:
+        """Get file content and filename from S3 for download.
+        
+        Args:
+            s3_service: S3 service instance
+            file_url: Full S3 path to the file
+            
+        Returns:
+            tuple: (file_content_bytes, filename)
+        """
+        try:
+            # Get file content from S3
+            content = s3_service.get_document_content(file_url)
+            
+            # Extract filename from URL
+            filename = file_url.split('/')[-1]
+            
+            if content:
+                return content, filename
+            return None, None
+            
+        except Exception as e:
+            print(f"Error getting download link: {str(e)}")
+            return None, None
+        
     def _render_finance_benchmarking(self):
         """Render existing finance benchmarking report interface."""
         try:
