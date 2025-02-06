@@ -20,343 +20,13 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from io import BytesIO
 import pandas as pd
+import re
+from docx import Document
+from docx.shared import Inches, Pt, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement, parse_xml
+from docx.oxml.ns import qn
 
-class ReportLabDocumentGenerator:
-    """Handles PDF generation using ReportLab."""
-    
-    def __init__(self):
-        """Initialize the document generator with default styles."""
-        self.styles = getSampleStyleSheet()
-        self.custom_styles = self._create_custom_styles()
-    
-    def _create_custom_styles(self):
-        """Create custom paragraph styles for the document."""
-        custom_styles = {
-            'Title': ParagraphStyle(
-                'CustomTitle',
-                parent=self.styles['Heading1'],
-                fontSize=24,
-                spaceAfter=30,
-                alignment=TA_CENTER
-            ),
-            'Heading1': ParagraphStyle(
-                'CustomHeading1',
-                parent=self.styles['Heading1'],
-                fontSize=18,
-                spaceAfter=12,
-                spaceBefore=12
-            ),
-            'Heading2': ParagraphStyle(
-                'CustomHeading2',
-                parent=self.styles['Heading2'],
-                fontSize=16,
-                spaceAfter=10,
-                spaceBefore=10
-            ),
-            'Heading3': ParagraphStyle(
-                'CustomHeading3',
-                parent=self.styles['Heading3'],
-                fontSize=14,
-                spaceAfter=8,
-                spaceBefore=8
-            ),
-            'Normal': ParagraphStyle(
-                'CustomNormal',
-                parent=self.styles['Normal'],
-                fontSize=11,
-                spaceAfter=8,
-                leading=14
-            ),
-            'Table': ParagraphStyle(
-                'CustomTable',
-                parent=self.styles['Normal'],
-                fontSize=10,
-                leading=12
-            )
-        }
-        return custom_styles
-    
-    def generate_line_chart(self, data: pd.DataFrame, title: str, y_label: str) -> Optional[go.Figure]:
-        """Generate a simplified line chart."""
-        try:
-            print(f"Generating line chart: {title}")
-            fig = go.Figure()
-            
-            # Define colors
-            colors = {
-                'BHC Base': '#000000',
-                'BHC Stress': '#0000FF',
-                'Sup Base': '#006400',
-                'Sup Sev Adv': '#800080'
-            }
-            
-            # Get time columns
-            time_cols = [col for col in data.columns if col.startswith('20')]
-            time_cols.sort()
-            
-            # Add traces
-            for scenario in colors.keys():
-                if scenario in data['Scenario ($bn)'].values:
-                    scenario_data = data[data['Scenario ($bn)'] == scenario]
-                    
-                    y_values = [scenario_data[col].iloc[0] for col in time_cols]
-                    
-                    fig.add_trace(go.Scatter(
-                        x=time_cols,
-                        y=y_values,
-                        name=scenario,
-                        line=dict(color=colors[scenario])
-                    ))
-            
-            # Simple layout
-            fig.update_layout(
-                title=title,
-                showlegend=True,
-                width=800,
-                height=400,
-                margin=dict(l=50, r=50, t=50, b=50)
-            )
-            
-            return fig
-            
-        except Exception as e:
-            print(f"Error in chart generation: {str(e)}")
-            return None
-
-    def generate_pdf(self, cached_data: dict, config: dict) -> BytesIO:
-        """Generate PDF document from cached data and configuration.
-        
-        Args:
-            cached_data: Dictionary containing document content
-            config: Document configuration dictionary
-            
-        Returns:
-            BytesIO: PDF document as a bytes buffer
-        """
-        buffer = BytesIO()
-        doc = SimpleDocTemplate(
-            buffer,
-            pagesize=A4,
-            rightMargin=0.75*inch,
-            leftMargin=0.75*inch,
-            topMargin=0.75*inch,
-            bottomMargin=0.75*inch
-        )
-        
-        elements = []
-        
-        # Add title page
-        self._add_title_page(elements, config['document_info'])
-        elements.append(PageBreak())
-        
-        # Add business sections
-        if 'business_sections' in cached_data:
-            for section_key, section_data in cached_data['business_sections'].items():
-                self._add_section(elements, section_key, section_data)
-                elements.append(PageBreak())
-        
-        # Build the PDF
-        doc.build(elements)
-        buffer.seek(0)
-        return buffer
-
-    def _add_title_page(self, elements: list, doc_info: dict):
-        """Add title page elements."""
-        # Add title
-        elements.append(Paragraph(
-            doc_info['title'],
-            self.custom_styles['Title']
-        ))
-        elements.append(Spacer(1, 30))
-        
-        # Add metadata
-        if 'metadata' in doc_info:
-            for key, value in doc_info['metadata'].items():
-                elements.append(Paragraph(
-                    f"{key}: {value}",
-                    self.custom_styles['Normal']
-                ))
-                elements.append(Spacer(1, 12))
-
-    def _add_section(self, elements: list, section_key: str, section_data: dict):
-        """Add a business section to the document."""
-        # Add section title
-        elements.append(Paragraph(
-            section_data.get('title', 'Untitled Section'),
-            self.custom_styles['Heading1']
-        ))
-        elements.append(Spacer(1, 12))
-        
-        # Add topics
-        if 'topics' in section_data:
-            for topic_key, topic_data in section_data['topics'].items():
-                self._add_topic(elements, topic_data)
-
-    def _add_topic(self, elements: list, topic_data: dict):
-        """Add a topic to the document."""
-        # Add topic title
-        elements.append(Paragraph(
-            topic_data.get('title', 'Untitled Topic'),
-            self.custom_styles['Heading2']
-        ))
-        elements.append(Spacer(1, 10))
-        
-        # Add driver information
-        if 'driver_info' in topic_data:
-            elements.append(Paragraph(
-                'Driver Information',
-                self.custom_styles['Heading3']
-            ))
-            self._add_driver_table(elements, topic_data['driver_info'])
-            elements.append(Spacer(1, 12))
-        
-        # Add projections
-        if 'projections' in topic_data:
-            self._add_projections(elements, topic_data['projections'])
-        
-        # Add narratives
-        if 'narratives' in topic_data:
-            self._add_narratives(elements, topic_data['narratives'])
-
-    def _add_driver_table(self, elements: list, driver_info: dict):
-        """Add driver information table."""
-        # Create table data
-        data = [
-            ['Dependent Variable', 'Independent Variable', 'Lag', 'Direction'],
-            [
-                driver_info.get('dependent_var', ''),
-                driver_info.get('independent_var', ''),
-                str(driver_info.get('lag', '')),
-                driver_info.get('direction', '')
-            ]
-        ]
-        
-        # Create table
-        table = Table(data, colWidths=[2*inch, 2*inch, 1*inch, 1*inch])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.blue),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 10),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-            ('BOX', (0, 0), (-1, -1), 2, colors.black),
-        ]))
-        
-        elements.append(table)
-
-    def _add_projections(self, elements: list, projections: dict):
-        """Add projection tables and charts."""
-        if 'assets' in projections:
-            elements.append(Paragraph(
-                'Assets Projection',
-                self.custom_styles['Heading3']
-            ))
-            self._add_projection_table(elements, projections['assets'])
-            elements.append(Spacer(1, 12))
-            
-            # Add assets chart
-            chart = self.generate_line_chart(
-                pd.DataFrame(projections['assets']),
-                'Assets Projection Over Time',
-                'Assets ($bn)'
-            )
-            if chart:
-                img_buffer = BytesIO()
-                chart.write_image(img_buffer, format='png')
-                img_buffer.seek(0)
-                elements.append(Image(img_buffer))
-                elements.append(Spacer(1, 12))
-        
-        if 'liabilities' in projections:
-            elements.append(Paragraph(
-                'Liabilities Projection',
-                self.custom_styles['Heading3']
-            ))
-            self._add_projection_table(elements, projections['liabilities'])
-            elements.append(Spacer(1, 12))
-            
-            # Add liabilities chart
-            chart = self.generate_line_chart(
-                pd.DataFrame(projections['liabilities']),
-                'Liabilities Projection Over Time',
-                'Liabilities ($bn)'
-            )
-            if chart:
-                img_buffer = BytesIO()
-                chart.write_image(img_buffer, format='png')
-                img_buffer.seek(0)
-                elements.append(Image(img_buffer))
-                elements.append(Spacer(1, 12))
-
-    def _add_projection_table(self, elements: list, projection_data: list):
-        """Add a projection data table."""
-        if not projection_data:
-            return
-        
-        # Convert data to DataFrame for easier handling
-        df = pd.DataFrame(projection_data)
-        
-        # Create table data
-        data = [df.columns.tolist()]  # Headers
-        data.extend(df.values.tolist())  # Data rows
-        
-        # Calculate column widths (distribute available space)
-        page_width = A4[0] - 1.5*inch  # Account for margins
-        col_width = page_width / len(df.columns)
-        
-        # Create table
-        table = Table(data, colWidths=[col_width]*len(df.columns))
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.blue),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 9),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-            ('BOX', (0, 0), (-1, -1), 2, colors.black),
-            ('TOPPADDING', (0, 0), (-1, -1), 3),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
-        ]))
-        
-        elements.append(table)
-
-    def _add_narratives(self, elements: list, narratives: dict):
-        """Add narrative sections."""
-        if 'overall' in narratives:
-            elements.append(Paragraph(
-                'Overall Analysis',
-                self.custom_styles['Heading3']
-            ))
-            elements.append(Paragraph(
-                narratives['overall'],
-                self.custom_styles['Normal']
-            ))
-            elements.append(Spacer(1, 12))
-        
-        if 'baseline' in narratives:
-            elements.append(Paragraph(
-                'Baseline Scenario Analysis',
-                self.custom_styles['Heading3']
-            ))
-            elements.append(Paragraph(
-                narratives['baseline'],
-                self.custom_styles['Normal']
-            ))
-            elements.append(Spacer(1, 12))
-        
-        if 'stress' in narratives:
-            elements.append(Paragraph(
-                'Stress Scenarios Analysis',
-                self.custom_styles['Heading3']
-            ))
-            elements.append(Paragraph(
-                narratives['stress'],
-                self.custom_styles['Normal']
-            ))
-            elements.append(Spacer(1, 12))
-            
 class DocumentGenerator:
     def __init__(self, common_config: Dict, s3_service, bedrock_service, doc_type: str = None):
         """Initialize document generator.
@@ -438,9 +108,18 @@ class DocumentGenerator:
                     **doc_config['output_settings']
                 },
                 'executive_summary': doc_config['executive_summary'],
-                'narrative_templates': doc_config['narrative_templates'],
                 'business_sections': doc_config['business_sections']
             })
+            
+            # Verify narrative templates exist in each business section
+            for section_key, section_data in merged_config['business_sections'].items():
+                if 'narrative_templates' not in section_data:
+                    raise ValueError(f"Narrative templates missing for business section: {section_key}")
+                    
+                required_templates = ['overall', 'baseline', 'stress']
+                missing_templates = [t for t in required_templates if t not in section_data['narrative_templates']]
+                if missing_templates:
+                    raise ValueError(f"Missing required templates {missing_templates} for section {section_key}")
             
             return merged_config
             
@@ -554,8 +233,8 @@ class DocumentGenerator:
             quarter_cols = ['2024Q1', '2024Q2', '2024Q3', '2024Q4', 
                           '2025Q1', '2025Q2', '2025Q3', '2025Q4', '2026Q1']
             
-            assets_df['9Q Avg'] = assets_df[quarter_cols].mean(axis=1)
-            liabilities_df['9Q Avg'] = liabilities_df[quarter_cols].mean(axis=1)
+            assets_df['9Q Avg'] = assets_df[quarter_cols].mean(axis=1).round(1)
+            liabilities_df['9Q Avg'] = liabilities_df[quarter_cols].mean(axis=1).round(1)
             
             #print("assets_df1")
             #print(assets_df)
@@ -645,22 +324,29 @@ class DocumentGenerator:
                 'Direction': driver_config['direction']
             }])
 
-            # Create Plotly table
+            # Create Plotly table with minimal height
             fig = go.Figure(data=[go.Table(
                 header=dict(
                     values=list(df.columns),
-                    fill_color='blue',
-                    font=dict(color='white'),
-                    align='center'
+                    fill_color='#0051A2',  # Blue background
+                    font=dict(color='white', size=12),
+                    align='center',
+                    height=30  # Reduced header height
                 ),
                 cells=dict(
                     values=[df[col] for col in df.columns],
                     fill_color='white',
-                    align='center'
+                    align='center',
+                    height=45  # Reduced cell height
                 )
             )])
 
-            fig.update_layout(margin=dict(l=0, r=0, t=0, b=0))
+            # Update layout to remove extra space
+            fig.update_layout(
+                margin=dict(l=0, r=0, t=0, b=0),
+                height=85  # Total height = header height + cell height
+            )
+            
             return fig
 
         except Exception as e:
@@ -801,8 +487,15 @@ class DocumentGenerator:
         try:
             narratives = {}
             
-            # Get narrative templates from config
-            narrative_templates = self.config['narrative_templates']
+            # Get business-specific narrative templates from config
+            if section_key not in self.config['business_sections']:
+                raise ValueError(f"Invalid section key: {section_key}")
+                
+            section_config = self.config['business_sections'][section_key]
+            if 'narrative_templates' not in section_config:
+                raise ValueError(f"No narrative templates found for section: {section_key}")
+                
+            narrative_templates = section_config['narrative_templates']
             
             # Format data for prompt
             formatted_data = self._format_data_for_narrative(
@@ -822,6 +515,7 @@ class DocumentGenerator:
             print("overall_prompt")
             print(overall_prompt)
             narratives['overall'] = self.bedrock_service.invoke_nova_model(overall_prompt)
+            #narratives['overall'] = self._format_model_response(response)
             
             # Generate baseline narrative
             baseline_prompt = self._create_narrative_prompt(
@@ -831,6 +525,8 @@ class DocumentGenerator:
                 'baseline',
                 driver_data
             )
+            #response = self.bedrock_service.invoke_nova_model(baseline_prompt)
+            #narratives['baseline'] = self._format_model_response(response)
             narratives['baseline'] = self.bedrock_service.invoke_nova_model(baseline_prompt)
             
             # Generate stress narrative
@@ -841,6 +537,8 @@ class DocumentGenerator:
                 'stress',
                 driver_data
             )
+            #response = self.bedrock_service.invoke_nova_model(stress_prompt)
+            #narratives['stress'] = self._format_model_response(response)
             narratives['stress'] = self.bedrock_service.invoke_nova_model(stress_prompt)
             
             return narratives
@@ -852,6 +550,10 @@ class DocumentGenerator:
     def _create_narrative_prompt(self, template: Dict, data: str, section_key: str, narrative_type: str, driver_data: pd.DataFrame) -> str:
         """Create specific narrative prompt based on type."""
         try:
+            # Get business-specific context if available
+            section_config = self.config['business_sections'][section_key]
+            business_context = section_config.get('business_context', '')
+            
             prompt = f"""Please analyze the provided financial projections and driver information to generate detailed CCAR model narratives as per the given example output.
 
 Data to Analyze:
@@ -865,6 +567,7 @@ Example Output provided below: This is how the CCAR users write narratives for t
 
 Additional Guidelines:
 1. Strictly follow the exact formatting shown in the example output with no deviation
+2. Focus on business-specific risk factors, drivers and considerations
 
 Strictly provide only the {narrative_type} narrative following exactly the format shown in the Example Output above."""
 
@@ -873,14 +576,47 @@ Strictly provide only the {narrative_type} narrative following exactly the forma
         except Exception as e:
             st.error(f"Error creating narrative prompt: {str(e)}")
             return ""    
+    
+    def _format_model_response(self, response_text: str) -> str:
+        """
+        Format the model response text to properly display in Streamlit UI.
+        Handles special characters and currency symbols.
+        
+        Args:
+            response_text: The original response text from the model
             
+        Returns:
+            Formatted text safe for Streamlit display
+        """
+        # Handle currency amounts with $ symbol
+        import re
+        
+        def replace_currency(match):
+            # Get the full match
+            full_match = match.group(0)
+            
+            # If it's $(number), format it with a space after $
+            if full_match.startswith('$('):
+                return r'\\$(' + match.group(1) + ')'
+            
+            # For regular $number
+            return r'\\$' + match.group(1)
+        
+        # Replace $number or $(number) patterns
+        # This handles both positive and negative currency values
+        formatted_text = re.sub(r'\$(\([0-9.,]+\)|\d*\.?\d+)', replace_currency, response_text)
+        
+        # Additional formatting if needed
+        formatted_text = formatted_text.replace('$bn', r'\\$bn')  # Handle "$bn" specifically
+        
+        return formatted_text
+    
     def generate_document(self) -> Tuple[Optional[str], Optional[str]]:
         """Generate document with all content."""
         try:
             # Define filenames
             base_filename = "2024_ppnr_methodology_and_process_overview"
             docx_filename = f"{base_filename}.docx"
-            pdf_filename = f"{base_filename}.pdf"
             json_filename = f"{base_filename}.json"
             
             # Get base path from config
@@ -898,18 +634,11 @@ Strictly provide only the {narrative_type} narrative following exactly the forma
             with open(json_filename, 'w') as f:
                 json.dump(self.cached_data, f, indent=2)
                 
-            doc.save(docx_filename)
-            
-            # Generate PDF using ReportLab
-            pdf_generator = ReportLabDocumentGenerator()
-            pdf_buffer = pdf_generator.generate_pdf(self.cached_data, self.config)
-            
-            with open(pdf_filename, 'wb') as pdf_file:
-                pdf_file.write(pdf_buffer.getvalue())
+            doc.save(docx_filename)            
 
             # Upload to S3
             try:
-                for filename in [docx_filename, pdf_filename, json_filename]:
+                for filename in [docx_filename, json_filename]:
                     full_path = os.path.join(s3_base_path, filename).replace('\\', '/')
                     self.s3_service.upload_document(filename, full_path)
                         
@@ -918,7 +647,7 @@ Strictly provide only the {narrative_type} narrative following exactly the forma
                 return None, None
             finally:
                 # Clean up local files
-                for filename in [docx_filename, pdf_filename, json_filename]:
+                for filename in [docx_filename, json_filename]:
                     try:
                         os.remove(filename)
                     except:
@@ -926,8 +655,7 @@ Strictly provide only the {narrative_type} narrative following exactly the forma
 
             # Return the full S3 paths
             docx_path = os.path.join(s3_base_path, docx_filename).replace('\\', '/')
-            pdf_path = os.path.join(s3_base_path, pdf_filename).replace('\\', '/')
-            return docx_path, pdf_path
+            return docx_path
 
         except Exception as e:
             st.error(f"Error generating document: {str(e)}")
@@ -957,7 +685,72 @@ Strictly provide only the {narrative_type} narrative following exactly the forma
             
         except Exception as e:
             st.error(f"Error loading cached data: {str(e)}")
-            return False
+            return False    
+    
+    def _create_section_cache(self, section_key: str, section_config: Dict) -> Dict:
+        """Create cache data for a section."""
+        try:
+            cache_data = {
+                'title': section_config['title'],
+                'topics': {}
+            }
+            
+            # Process each topic
+            for topic_key, topic_config in section_config['topics'].items():
+                topic_data = {
+                    'title': topic_config['title'],
+                    'driver_info': topic_config.get('driver_info', {}),
+                    'projections': {},
+                    'narratives': {}
+                }
+                
+                # Process data
+                data = self._process_csv_data(
+                    business_line=section_config['title'],
+                    data_files={
+                        'base_period': self.config['input_settings']['base_period_file'],
+                        'scenarios': self.config['input_settings']['scenario_files']
+                    }
+                )
+                
+                if data and len(data) == 2:
+                    assets_df, liabilities_df = data
+                    
+                    # Store projections data
+                    topic_data['projections'] = {
+                        'assets': assets_df.to_dict('records') if not assets_df.empty else None,
+                        'liabilities': liabilities_df.to_dict('records') if not liabilities_df.empty else None
+                    }
+                    
+                    # Generate and store narratives
+                    narratives = self.generate_narratives(
+                        section_key,
+                        {'assets': assets_df, 'liabilities': liabilities_df}
+                    )
+                    topic_data['narratives'] = narratives
+                
+                cache_data['topics'][topic_key] = topic_data
+                
+            return cache_data
+            
+        except Exception as e:
+            st.error(f"Error creating section cache: {str(e)}")
+            return {}
+    
+    def _generate_complete_cache(self) -> Dict:
+        """Generate complete cache data for all sections."""
+        cache_data = {
+            'document_info': self.config['document_info'],
+            'executive_summary': self.config['executive_summary'],
+            'business_sections': {}
+        }
+        
+        # Process each business section
+        for section_key, section_config in self.config['business_sections'].items():
+            cache_data['business_sections'][section_key] = self._create_section_cache(
+                section_key, section_config)
+                
+        return cache_data
 
     def get_latest_documents(self) -> Optional[Dict]:
         """Get the existing document versions from S3."""
@@ -967,7 +760,7 @@ Strictly provide only the {narrative_type} narrative following exactly the forma
             docs = {}
             
             base_filename = "2024_ppnr_methodology_and_process_overview"
-            for ext in ['.docx', '.pdf', '.json']:
+            for ext in ['.docx', '.json']:
                 filename = f"{base_filename}{ext}"
                 full_path = os.path.join(s3_base_path, filename).replace('\\', '/')
                 
@@ -992,7 +785,7 @@ Strictly provide only the {narrative_type} narrative following exactly the forma
         """
         missing_sections = []
         
-        try:
+        try:            
             # Check executive summary
             if 'executive_summary' not in cached_data:
                 missing_sections.append("Executive Summary section is missing")
@@ -1009,6 +802,10 @@ Strictly provide only the {narrative_type} narrative following exactly the forma
                 # Check section has topics
                 if 'topics' not in section_data:
                     missing_sections.append(f"Section '{section_key}' is missing topics")
+                    continue
+                
+                if 'narrative_templates' not in self.config['business_sections'][section_key]:
+                    missing_sections.append(f"Section '{section_key}' is missing narrative templates")
                     continue
                     
                 for topic_key, topic_data in section_data['topics'].items():
@@ -1051,34 +848,221 @@ Strictly provide only the {narrative_type} narrative following exactly the forma
         except Exception as e:
             missing_sections.append(f"Error during validation: {str(e)}")
             return False, missing_sections
-        
+    
+    def _set_cell_background(self, cell, hex_color: str):
+        """Set cell background color."""
+        cell_properties = cell._tc.get_or_add_tcPr()
+        shading_element = OxmlElement('w:shd')
+        shading_element.set(qn('w:fill'), hex_color)
+        cell_properties.append(shading_element)
+    
     def _add_document_content(self, doc: Document):
-        """Add content to the Word document."""
+        """Add content to the Word document from cached data."""
         try:
-            print("Adding document content...")
+            print("Starting document generation...")
+            
+            # Set document properties
+            sections = doc.sections
+            for section in sections:
+                section.left_margin = Inches(1)
+                section.right_margin = Inches(1)
+                section.top_margin = Inches(1)
+                section.bottom_margin = Inches(1)
+            
             # Add title
-            title = doc.add_heading(self.config['document_info']['title'], 0)
+            title = doc.add_heading(self.cached_data['document_info']['title'], level=0)
             title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            doc.add_paragraph()  # Add spacing
 
             # Add Executive Summary
-            if 'executive_summary' in self.config:
+            if 'executive_summary' in self.cached_data:
                 print("Adding executive summary...")
                 doc.add_heading('Executive Summary', level=1)
-                for section in self.config['executive_summary']['sections']:
+                
+                for section in self.cached_data['executive_summary']['sections']:
+                    # Add section heading
                     doc.add_heading(section['title'], level=2)
-                    doc.add_paragraph(section['content'])
+                    para = doc.add_paragraph()
+                    para.add_run(section['content'])
+                    doc.add_paragraph()  # Add spacing
+                    
+                doc.add_page_break()
 
-            # Add business sections
-            if 'business_sections' in self.config:
+            # Add business sections from cached data
+            if 'business_sections' in self.cached_data:
                 print("Adding business sections...")
-                for section_key, section_data in self.config['business_sections'].items():
-                    print(f"Processing section: {section_key}")
-                    self._add_section_content(doc, section_key, section_data)
-                    doc.add_page_break()
+                for section_key, section_data in self.cached_data['business_sections'].items():
+                    # Add section heading
+                    doc.add_heading(section_data['title'], level=1)
+                    
+                    # Process each topic
+                    for topic_key, topic_data in section_data['topics'].items():
+                        print(f"Processing topic: {topic_key}")
+                        
+                        # Add topic heading
+                        doc.add_heading(topic_data['title'], level=2)
+                        
+                        # Add driver information
+                        if 'driver_info' in topic_data and 'table' in topic_data['driver_info']:
+                            doc.add_heading('Driver Information', level=3)
+                            driver_info = topic_data['driver_info']['table']
+                            
+                            # Create table
+                            table = doc.add_table(rows=2, cols=4)
+                            table.style = 'Table Grid'
+                            
+                            # Add headers
+                            headers = ['Dependent Variable', 'Independent Variable', 'Lag', 'Direction']
+                            header_cells = table.rows[0].cells
+                            for i, header in enumerate(headers):
+                                cell = header_cells[i]
+                                cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                run = cell.paragraphs[0].add_run(header)
+                                run.font.bold = True
+                                run.font.color.rgb = RGBColor(255, 255, 255)
+                                # Set blue background
+                                self._set_cell_background(cell, "0051A2")
+                            
+                            # Add data
+                            data = [
+                                driver_info['dependent_var'],
+                                driver_info['independent_var'],
+                                str(driver_info['lag']),
+                                driver_info['direction']
+                            ]
+                            data_cells = table.rows[1].cells
+                            for i, value in enumerate(data):
+                                cell = data_cells[i]
+                                cell.text = str(value)
+                                cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                            
+                            doc.add_paragraph()  # Add spacing
+                        
+                        # Add projections
+                        if 'projections' in topic_data:
+                            # Assets projections
+                            if 'assets' in topic_data['projections']:
+                                assets_data = topic_data['projections']['assets']
+                                if assets_data:
+                                    doc.add_heading("FI Financing total assets projections", level=3)
+                                    assets_df = pd.DataFrame(assets_data)
+                                    
+                                    # Create table
+                                    table = doc.add_table(rows=len(assets_df)+1, cols=len(assets_df.columns))
+                                    table.style = 'Table Grid'
+                                    
+                                    # Add headers
+                                    header_cells = table.rows[0].cells
+                                    for j, col in enumerate(assets_df.columns):
+                                        cell = header_cells[j]
+                                        cell.text = str(col)
+                                        cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                        run = cell.paragraphs[0].runs[0]
+                                        run.font.bold = True
+                                        run.font.color.rgb = RGBColor(255, 255, 255)
+                                        # Set blue background
+                                        self._set_cell_background(cell, "0051A2")
+                                    
+                                    # Add data
+                                    for i, row in assets_df.iterrows():
+                                        for j, value in enumerate(row):
+                                            cell = table.rows[i+1].cells[j]
+                                            cell.text = str(value)
+                                            cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                    
+                                    doc.add_paragraph()  # Add spacing
+                                    
+                                    # Add chart if available
+                                    try:
+                                        fig = self.generate_line_chart(
+                                            assets_df,
+                                            "FI Financing total Consolidated assets",
+                                            "Assets ($bn)"
+                                        )
+                                        if fig:
+                                            print("Before calling _create_chart_image")
+                                            img_bytes = self._create_chart_image(fig)
+                                            print("After calling _create_chart_image")
+                                            if img_bytes:
+                                                doc.add_picture(BytesIO(img_bytes), width=Inches(6))
+                                                doc.add_paragraph()
+                                    except Exception as chart_error:
+                                        print(f"Error adding assets chart: {str(chart_error)}")
+                            
+                            # Liabilities projections
+                            if 'liabilities' in topic_data['projections']:
+                                liabilities_data = topic_data['projections']['liabilities']
+                                if liabilities_data:
+                                    doc.add_heading("FI Financing total liabilities projections", level=3)
+                                    liabilities_df = pd.DataFrame(liabilities_data)
+                                    
+                                    # Create table
+                                    table = doc.add_table(rows=len(liabilities_df)+1, cols=len(liabilities_df.columns))
+                                    table.style = 'Table Grid'
+                                    
+                                    # Add headers
+                                    header_cells = table.rows[0].cells
+                                    for j, col in enumerate(liabilities_df.columns):
+                                        cell = header_cells[j]
+                                        cell.text = str(col)
+                                        cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                        run = cell.paragraphs[0].runs[0]
+                                        run.font.bold = True
+                                        run.font.color.rgb = RGBColor(255, 255, 255)
+                                        # Set blue background
+                                        self._set_cell_background(cell, "0051A2")
+                                    
+                                    # Add data
+                                    for i, row in liabilities_df.iterrows():
+                                        for j, value in enumerate(row):
+                                            cell = table.rows[i+1].cells[j]
+                                            cell.text = str(value)
+                                            cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                    
+                                    doc.add_paragraph()  # Add spacing
+                                    
+                                    # Add chart if available
+                                    try:
+                                        fig = self.generate_line_chart(
+                                            liabilities_df,
+                                            "FI Financing total Consolidated liabilities",
+                                            "Liabilities ($bn)"
+                                        )
+                                        if fig:
+                                            img_bytes = self._create_chart_image(fig)
+                                            if img_bytes:
+                                                doc.add_picture(BytesIO(img_bytes), width=Inches(6))
+                                                doc.add_paragraph()
+                                    except Exception as chart_error:
+                                        print(f"Error adding liabilities chart: {str(chart_error)}")
+                        
+                        # Add narratives
+                        if 'narratives' in topic_data:
+                            narratives = topic_data['narratives']
+                            
+                            if 'overall' in narratives:
+                                doc.add_heading('Analysis', level=2)
+                                doc.add_paragraph(narratives['overall'])
+                                doc.add_paragraph()  # Add spacing
+                            
+                            if 'baseline' in narratives:
+                                doc.add_heading('Baseline Scenario', level=3)
+                                doc.add_paragraph(narratives['baseline'])
+                                doc.add_paragraph()  # Add spacing
+                            
+                            if 'stress' in narratives:
+                                doc.add_heading('Stress Scenarios', level=3)
+                                doc.add_paragraph(narratives['stress'])
+                                doc.add_paragraph()  # Add spacing
+                    
+                    doc.add_page_break()  # Add page break after each section
+
+            print("Document content added successfully")
 
         except Exception as e:
-            print(f"Error in _add_document_content: {str(e)}")
-            st.error(f"Error adding document content: {str(e)}")
+            print(f"Error adding document content: {str(e)}")
+            import traceback
+            print(f"Full error: {traceback.format_exc()}")
             raise
 
     def _add_section_content(self, doc: Document, section_key: str, section_data: Dict):
@@ -1210,13 +1194,17 @@ Strictly provide only the {narrative_type} narrative following exactly the forma
                     print(f"Adding {proj_type} chart...")
                     chart_title = topic_data['projections'][proj_type]['chart_title']
                     fig = self.generate_line_chart(df, chart_title, y_label)
-                    
+                    print(f"After adding {proj_type} chart...")
                     if fig:
+                        print(f"Before creating {proj_type} chart image...")
                         img_bytes = self._create_chart_image(fig)
+                        print(f"After creating {proj_type} chart image...")
                         if img_bytes:
                             try:
                                 img_stream = BytesIO(img_bytes)
+                                print(f"Before adding {proj_type} picture...")
                                 doc.add_picture(img_stream, width=Inches(6))
+                                print(f"After adding {proj_type} picture...")
                                 doc.add_paragraph()
                                 print(f"{proj_type} chart added successfully")
                             except Exception as chart_error:
@@ -1306,6 +1294,7 @@ Strictly provide only the {narrative_type} narrative following exactly the forma
     def _create_chart_image(self, fig: go.Figure) -> Optional[bytes]:
         """Create chart image bytes with simplified settings."""
         try:
+            print("Inside _create_chart_image")
             # Use minimal layout settings
             fig.update_layout(
                 width=800,
@@ -1314,7 +1303,7 @@ Strictly provide only the {narrative_type} narrative following exactly the forma
                 plot_bgcolor='white',
                 showlegend=True
             )
-            
+            print("Updated layout")
             # Convert to image with basic settings
             img_bytes = fig.to_image(
                 format="png",
@@ -1322,7 +1311,7 @@ Strictly provide only the {narrative_type} narrative following exactly the forma
                 width=800,
                 height=400
             )
-            
+            print("Created Image inside _create_chart_image")
             return img_bytes
         except Exception as e:
             print(f"Error creating chart image: {str(e)}")
